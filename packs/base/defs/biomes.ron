@@ -1,0 +1,52 @@
+// Biomes are chosen per hex from three climate values:
+//
+//   elevation    percentile: 0.55 means 55% of the world is lower
+//   moisture     percentile: 0.30 means 30% of the world is drier
+//   temperature  0.0 = polar, 1.0 = equatorial (cooler with altitude)
+//
+// The matching biome with the highest `priority` wins. Ranges default to
+// "anything", so a biome only needs to state what makes it special.
+(
+    biomes: [
+        // ---- Water ---------------------------------------------------------
+        (id: "water_base", abstract: true, water: true, elevation: (0.0, 0.55)),
+
+        (id: "deep_ocean", parent: "water_base", name: "Deep Ocean", color: "#1d335e",
+            elevation: (0.0, 0.33)),
+        (id: "ocean", parent: "water_base", name: "Ocean", color: "#27508a",
+            elevation: (0.33, 0.5)),
+        (id: "shallows", parent: "water_base", name: "Shallows", color: "#3a6fae",
+            elevation: (0.5, 0.55)),
+        (id: "sea_ice", parent: "water_base", name: "Sea Ice", color: "#c9dbe6",
+            temperature: (0.0, 0.07), priority: 5),
+
+        // ---- Land ----------------------------------------------------------
+        (id: "land_base", abstract: true, water: false, elevation: (0.55, 1.0)),
+
+        (id: "grassland", parent: "land_base", name: "Grassland", color: "#7aa64a"),
+        (id: "forest", parent: "land_base", name: "Forest", color: "#3e7432",
+            temperature: (0.3, 0.72), moisture: (0.55, 1.0), priority: 1),
+        (id: "taiga", parent: "land_base", name: "Taiga", color: "#335a46",
+            temperature: (0.16, 0.3), moisture: (0.35, 1.0), priority: 1),
+        (id: "tundra", parent: "land_base", name: "Tundra", color: "#8b9a86",
+            temperature: (0.0, 0.16), priority: 1),
+        (id: "glacier", parent: "land_base", name: "Glacier", color: "#e9f0f4",
+            temperature: (0.0, 0.06), priority: 2),
+        (id: "savanna", parent: "land_base", name: "Savanna", color: "#b3a24c",
+            temperature: (0.62, 1.0), moisture: (0.25, 0.55), priority: 1),
+        (id: "desert", parent: "land_base", name: "Desert", color: "#d9c27e",
+            temperature: (0.55, 1.0), moisture: (0.0, 0.25), priority: 1),
+        (id: "jungle", parent: "land_base", name: "Jungle", color: "#2a7232",
+            temperature: (0.72, 1.0), moisture: (0.6, 1.0), priority: 2),
+        (id: "swamp", parent: "land_base", name: "Swamp", color: "#536b49",
+            elevation: (0.55, 0.6), moisture: (0.85, 1.0), temperature: (0.35, 1.0), priority: 3),
+
+        // ---- Highlands (override climate) ----------------------------------
+        (id: "hills", parent: "land_base", name: "Hills", color: "#8d8a57",
+            elevation: (0.9, 0.96), priority: 4),
+        (id: "mountains", parent: "land_base", name: "Mountains", color: "#776d66",
+            elevation: (0.96, 0.99), priority: 5),
+        (id: "peaks", parent: "land_base", name: "Snowy Peaks", color: "#e4e8ec",
+            elevation: (0.99, 1.0), priority: 6),
+    ],
+)

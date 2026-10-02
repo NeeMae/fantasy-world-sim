@@ -1,0 +1,21 @@
+[package]
+name = "sim-cli"
+description = "Headless world simulation runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sim-cli"
+path = "src/main.rs"
+
+[dependencies]
+content.workspace = true
+sim-core.workspace = true
+worldgen.workspace = true
+map-raster.workspace = true
+clap.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

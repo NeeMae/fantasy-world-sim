@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+sim-core = { path = "crates/sim-core" }
+content = { path = "crates/content" }
+worldgen = { path = "crates/worldgen" }
+map-raster = { path = "crates/map-raster" }
+
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+thiserror = "2"
+rand = "0.10"
+rand_chacha = "0.10"
+noise = "0.9"
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+bevy = { version = "0.19", default-features = false, features = ["2d"] }
+bevy_egui = "0.42"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Keep dev builds of the app playable: optimise dependencies, not our crates.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

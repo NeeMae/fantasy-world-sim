@@ -28,7 +28,8 @@ optionally intervene as a god or take over a ruler.
 | Parallelism | `rayon` | Data-parallel tick phases over hex/province arrays |
 | Rendering | `bevy` (render + input only) | wgpu-based, cross-platform, good 2D/pixel support; the sim does **not** live in Bevy's ECS |
 | UI | `bevy_egui` | Inspector panels, chronicle, debug tooling with little effort |
-| Content format | RON (or TOML) via `serde` | Human-editable, versionable content packs |
+| Content format | RON via `serde` | Human-editable, Rust-native (enums, tuples), versionable content packs |
+| Scripting | Rhai | Sandboxed, pure-Rust embedded scripting for events and mod logic |
 | RNG | `rand_chacha` / `rand_pcg` | Seedable, portable, stable across versions |
 | Noise | `noise` / `fastnoise-lite` | Worldgen |
 | Tests | `cargo test` + headless CLI | Long-run "does history stay interesting" checks |
@@ -43,6 +44,7 @@ can be swapped (e.g. `macroquad` or raw `wgpu`) without touching the sim.
 crates/
   sim-core/     # world state, tick systems, commands, chronicle. No graphics deps.
   worldgen/     # terrain, rivers, biomes, provinces, initial peoples/factions
+  map-raster/   # hex world -> pixel-art image; shared by app (texture) and CLI (PNG)
   content/      # schema + loader for user content packs; validation
   sim-cli/      # headless runner: `sim-cli --seed 42 --years 2000 --pack packs/base`
   app/          # Bevy + egui desktop app (renderer, camera, UI, input -> commands)
@@ -54,8 +56,12 @@ docs/
 ## The world: hexes, rendered as pixels
 
 The sim runs on a **hex grid** (axial coordinates, flat-topped), e.g. 512×320
-hexes ≈ 160k cells to start, scaling toward ~1M as performance allows, with
-optional east-west wrap.
+hexes ≈ 160k cells to start, scaling toward ~1M as performance allows.
+
+**Topology:** a bounded rectangle first. Cylindrical (east-west) wrap comes
+later as an option, not a replacement. To keep that cheap, all neighbour,
+distance and pathfinding queries go through a `Topology` type
+(`Bounded | WrapX`) from day one, and no system does raw coordinate maths.
 
 The "pixels like sand" feeling is kept **in the presentation and in local effects**,
 not in the macro sim:
@@ -128,8 +134,21 @@ family trees, and lore export.
 
 ## User-defined content
 
-Content packs are directories of RON files, layered (`base` → user packs →
-per-world overrides). Anything not specified is generated.
+Modding follows the RimWorld model: **everything is a def.** Content packs are
+directories of RON files, layered (`base` → user packs → per-world overrides).
+Anything not specified is generated.
+
+- Every def has a unique `id`; packs can add new defs or **override/patch**
+  existing ones by id.
+- Defs can be `abstract` and inherit from a `parent` (RimWorld's
+  `ParentName`), so a mod can define `ElfBase` once and derive variants.
+- Engine code never hard-codes content: the base game is itself just a pack.
+- The loader is format-agnostic through serde, so JSON could be accepted as an
+  alternate input later at little cost; RON is canonical.
+- **Rhai scripts** handle logic that data can't express: event conditions and
+  outcomes, custom god powers, AI personality hooks. Scripts run inside
+  the deterministic tick (seeded RNG exposed to them, no wall-clock or I/O) and
+  can only act through commands.
 
 | Defineable | Example |
 |---|---|
@@ -143,8 +162,8 @@ per-world overrides). Anything not specified is generated.
 | Events | Scripted or conditional events ("in year 300, the Lich awakens") |
 | Name lists | Per-culture syllable/markov name tables |
 
-Schema validation produces clear errors in the app and CLI. Scripting
-(e.g. Lua via `mlua` or Rhai) is a later consideration; start purely data-driven.
+Schema validation produces clear errors in the app and CLI. Defs come first;
+Rhai is introduced with the event system (Phase 5).
 
 ## Art
 
@@ -172,6 +191,7 @@ tileset is a drop-in replacement.
 | 5. Fantasy | Monsters, magic, religion, cellular hazards, catastrophes | Distinctly high fantasy |
 | 6. Play | Save/load (seed + command log), god powers, ruler mode, scenarios | Optional game layers work |
 | 7. Worldbuilding tools | Full user-defined content, map painting, lore export (Markdown/JSON) | Usable as a setting-design tool |
+| 8. Cylindrical worlds | `WrapX` topology: wrapping camera, borders and pathfinding across the seam | A world can be generated and simulated with east-west wrap |
 
 **MVP = phases 0–3.**
 
@@ -182,9 +202,11 @@ tileset is a drop-in replacement.
 - App holds 60 fps while rendering independently of sim speed
   (sim on its own thread, renderer reads a published snapshot)
 
-## Open questions
+## Decisions
 
-- Tick length: monthly vs seasonal
-- World wrap: flat continent vs cylindrical world
-- Scripting language for events, if any (Lua vs Rhai)
-- Content format: RON vs TOML
+| Question | Decision |
+|---|---|
+| Tick length | One month |
+| World shape | Bounded rectangle now; optional east-west wrap later (Phase 8), kept possible via the `Topology` abstraction |
+| Content format | RON, RimWorld-style defs with inheritance and patching |
+| Scripting | Rhai, from Phase 5 |

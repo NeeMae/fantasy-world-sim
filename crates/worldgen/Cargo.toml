@@ -1,0 +1,16 @@
+[package]
+name = "worldgen"
+description = "Procedural world generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+content.workspace = true
+sim-core.workspace = true
+noise.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
