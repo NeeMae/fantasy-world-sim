@@ -32,7 +32,7 @@ App controls:
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
-| M | Cycle map views: Terrain, Elevation, Plates |
+| M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Plates |
 | Space, 1–5 | Pause/resume, speed |
 
 The World panel generates a new world from:
@@ -49,12 +49,18 @@ The World panel generates a new world from:
 
 `sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
 `--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`),
-and `--view terrain|elevation|plates` for `--png`.
+and `--view terrain|elevation|rainfall|temperature|plates` for `--png`.
 
 Mountains come from plate tectonics: colliding plates raise ranges (with
 trenches offshore and island arcs at sea), separating plates open rifts, and
 microplates add hill country. The Plates view shows the plates, with
 boundaries tinted red where they collide and blue where they pull apart.
+
+Rainfall is simulated after Dwarf Fortress: prevailing winds (trade winds,
+westerlies, polar easterlies) carry moisture from warm seas inland, rain it
+out steadily, and dump most of it on the windward side of mountains,
+leaving rain shadows behind them. Latitude bands make the equator wet and
+the subtropics dry.
 
 ## Layout
 
@@ -97,9 +103,17 @@ Biome climate ranges are percentiles for elevation and moisture (so
 polar-to-equatorial scale for temperature. See `packs/base/defs/biomes.ron`.
 
 Relief (flat, hills, mountains, …) is separate from biome, so a hex can be
-forested hills or desert mountains. Relief defs pick a range of the
-tectonically driven `ruggedness` value and a map symbol; see
-`packs/base/defs/reliefs.ron`:
+forested hills or desert mountains. Biomes can also require a relief and a
+`massif` (how great the mountain range is), so great ranges get their own
+biomes (Alpine, Crags, Snowy Peaks in the base pack) while small or old
+ranges keep the biome of the land around them:
+
+```ron
+(id: "alpine", relief: ["mountains"], massif: (0.35, 1.0), moisture: (0.3, 1.0), priority: 6)
+```
+
+Relief defs pick a range of the tectonically driven `ruggedness` value and
+a map symbol; see `packs/base/defs/reliefs.ron`:
 
 ```ron
 (reliefs: [(id: "badlands", name: "Badlands", ruggedness: (0.35, 0.5), priority: 1, glyph: "hills")])

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Rgb;
+use crate::{ReliefId, Rgb};
 
 /// An inclusive numeric range, written as `(min, max)`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -23,8 +23,9 @@ impl Default for Range {
 /// A terrain biome.
 ///
 /// World generation produces normalised elevation, moisture and temperature
-/// values in `0.0..=1.0` for every hex, then assigns the highest-`priority`
-/// biome whose ranges contain all three.
+/// values in `0.0..=1.0` for every hex, plus its relief and *massif* (how
+/// great the mountain range it's part of is), then assigns the
+/// highest-`priority` biome whose conditions all hold.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BiomeDef {
@@ -42,16 +43,38 @@ pub struct BiomeDef {
     pub moisture: Range,
     #[serde(default)]
     pub temperature: Range,
+    /// Relief ids this biome needs (e.g. `["mountains"]`); empty for any.
+    #[serde(default)]
+    pub relief: Vec<String>,
+    /// How great a mountain range must be, from 0 (none, or old worn-down
+    /// ranges) to 1 (the greatest collision ranges).
+    #[serde(default)]
+    pub massif: Range,
     /// Higher priority wins when several biomes match.
     #[serde(default)]
     pub priority: i32,
+    /// `relief` resolved against the registry.
+    #[serde(skip)]
+    pub relief_ids: Vec<ReliefId>,
+}
+
+/// The conditions at one hex that decide its biome.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Site {
+    pub elevation: f32,
+    pub moisture: f32,
+    pub temperature: f32,
+    pub relief: ReliefId,
+    pub massif: f32,
 }
 
 impl BiomeDef {
-    pub fn matches(&self, elevation: f32, moisture: f32, temperature: f32) -> bool {
-        self.elevation.contains(elevation)
-            && self.moisture.contains(moisture)
-            && self.temperature.contains(temperature)
+    pub fn matches(&self, site: Site) -> bool {
+        self.elevation.contains(site.elevation)
+            && self.moisture.contains(site.moisture)
+            && self.temperature.contains(site.temperature)
+            && self.massif.contains(site.massif)
+            && (self.relief_ids.is_empty() || self.relief_ids.contains(&site.relief))
     }
 }
 

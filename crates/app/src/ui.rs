@@ -51,6 +51,8 @@ pub fn panels(
             for (mode, label) in [
                 (MapMode::Terrain, "Terrain"),
                 (MapMode::Elevation, "Elevation"),
+                (MapMode::Rainfall, "Rainfall"),
+                (MapMode::Temperature, "Temperature"),
                 (MapMode::Plates, "Plates"),
             ] {
                 ui.selectable_value(&mut map_mode.0, mode, label).on_hover_text("M cycles map views");
@@ -283,7 +285,7 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
         for (label, value) in [
             ("Position", format!("{col}, {row}")),
             ("Elevation", format!("{:.0}%", t.elevation[i] * 100.0)),
-            ("Moisture", format!("{:.0}%", t.moisture[i] * 100.0)),
+            ("Rainfall", format!("{:.0}%", t.moisture[i] * 100.0)),
             ("Temperature", format!("{:.0}%", t.temperature[i] * 100.0)),
             (
                 "Relief",
@@ -293,6 +295,7 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
                     t.ruggedness[i] * 100.0
                 ),
             ),
+            ("Range", range_description(t.massif[i])),
             ("Plate", plate_description(world, i)),
         ] {
             ui.label(label);
@@ -303,6 +306,16 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
         ui.monospace(&biome.id);
         ui.end_row();
     });
+}
+
+fn range_description(massif: f32) -> String {
+    match massif {
+        m if m >= 0.6 => "Great range",
+        m if m >= 0.35 => "Major range",
+        m if m >= 0.1 => "Minor or old range",
+        _ => "None",
+    }
+    .to_string()
 }
 
 fn plate_description(world: &sim_core::World, i: usize) -> String {
@@ -341,7 +354,9 @@ pub fn hotkeys(
     if keys.just_pressed(KeyCode::KeyM) {
         map_mode.0 = match map_mode.0 {
             MapMode::Terrain => MapMode::Elevation,
-            MapMode::Elevation => MapMode::Plates,
+            MapMode::Elevation => MapMode::Rainfall,
+            MapMode::Rainfall => MapMode::Temperature,
+            MapMode::Temperature => MapMode::Plates,
             MapMode::Plates => MapMode::Terrain,
         };
     }

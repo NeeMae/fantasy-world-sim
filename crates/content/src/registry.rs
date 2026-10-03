@@ -28,7 +28,7 @@ pub struct Registry {
 impl Registry {
     pub(crate) fn new(
         packs: Vec<PackManifest>,
-        biomes: Vec<BiomeDef>,
+        mut biomes: Vec<BiomeDef>,
         mut reliefs: Vec<ReliefDef>,
     ) -> Result<Self, ContentError> {
         let too_many =
@@ -44,8 +44,32 @@ impl Registry {
             reliefs.push(ReliefDef::flat());
         }
         let biome_ids = biomes.iter().enumerate().map(|(i, b)| (b.id.clone(), BiomeId(i as u16))).collect();
-        let relief_ids = reliefs.iter().enumerate().map(|(i, r)| (r.id.clone(), ReliefId(i as u8))).collect();
+        let relief_ids: HashMap<String, ReliefId> =
+            reliefs.iter().enumerate().map(|(i, r)| (r.id.clone(), ReliefId(i as u8))).collect();
+        for biome in &mut biomes {
+            biome.relief_ids = biome
+                .relief
+                .iter()
+                .map(|id| {
+                    relief_ids.get(id).copied().ok_or_else(|| ContentError::Invalid {
+                        origin: format!("biome {:?}", biome.id),
+                        message: format!("unknown relief {id:?}"),
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+        }
         Ok(Registry { packs, biomes, biome_ids, reliefs, relief_ids })
+    }
+
+    /// The elevation (a percentile) below which hexes are sea: the highest
+    /// upper elevation bound of any water biome.
+    pub fn sea_level(&self) -> f32 {
+        self.biomes
+            .iter()
+            .filter(|b| b.water && b.elevation.1.is_finite())
+            .map(|b| b.elevation.1)
+            .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.max(v))))
+            .unwrap_or(0.5)
     }
 
     pub fn reliefs(&self) -> &[ReliefDef] {

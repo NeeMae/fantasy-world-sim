@@ -76,6 +76,10 @@ pub enum MapMode {
     /// Tectonic plates, with boundaries tinted red where plates collide and
     /// blue where they pull apart.
     Plates,
+    /// Rainfall, from parched to drenched.
+    Rainfall,
+    /// Temperature, from frozen to tropical.
+    Temperature,
 }
 
 impl Default for RenderOptions {
@@ -176,6 +180,32 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
                     biome.color
                 }
                 MapMode::Elevation => elevation_color(elevation, biome.water),
+                MapMode::Rainfall => {
+                    let c = ramp(
+                        &[
+                            (0.0, Rgb(150, 105, 60)),
+                            (0.3, Rgb(215, 195, 120)),
+                            (0.55, Rgb(120, 175, 90)),
+                            (0.8, Rgb(40, 130, 110)),
+                            (1.0, Rgb(30, 70, 150)),
+                        ],
+                        world.terrain.moisture[i],
+                    );
+                    if biome.water { c.scale(0.55) } else { c }
+                }
+                MapMode::Temperature => {
+                    let c = ramp(
+                        &[
+                            (0.0, Rgb(235, 240, 250)),
+                            (0.2, Rgb(110, 150, 220)),
+                            (0.45, Rgb(110, 190, 120)),
+                            (0.7, Rgb(235, 200, 80)),
+                            (1.0, Rgb(210, 70, 50)),
+                        ],
+                        world.terrain.temperature[i],
+                    );
+                    if biome.water { c.scale(0.55) } else { c }
+                }
                 MapMode::Plates => {
                     let g = &world.geology;
                     let plate = g.plate[i];

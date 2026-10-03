@@ -104,7 +104,15 @@ trivially serialisable.
   junctions (tested).
 - **Relief vs biome:** relief (flat/hills/mountains, content-defined) is a
   separate layer from biome, driven by tectonic ruggedness plus high
-  ground. Placeholder art draws one symbol per seven-hex "flower".
+  ground. Placeholder art draws one symbol per seven-hex "flower". Biomes
+  may require a relief and a *massif* (range greatness from the tectonic
+  uplift), so the Alps, Rockies and Himalaya differ while the Appalachians
+  keep their forests and hills never change the biome.
+- **Climate:** temperature from latitude and altitude. Rainfall is
+  simulated: winds by latitude band carry moisture from warm seas, rain it
+  out over land, wring it out over mountains (rain shadows), with wet
+  equator, dry subtropics and recycling by vegetation. Rates are per
+  noise-space distance, so climate is scale-independent (tested).
 - **World size vs scale:** *world size* is how much of the planet the map
   shows (region → planet); *scale* is how many hexes it's drawn with. The
   same seed gives the same geography at any scale, and noise detail finer
@@ -249,7 +257,8 @@ tileset is a drop-in replacement.
 | 0.5 Editor basics ✅ | Hex outlines, terrain brush with undo/redo, instant god powers, regenerate | Worlds can be rerolled and reshaped comfortably |
 | 0.6 World shape ✅ | Open/ocean edges, world size vs scale, custom canvas, east-west wrap | Region maps through wrapped planets from one generator |
 | 0.7 Tectonics ✅ | Plates, boundary landforms, relief layer, map views (terrain/elevation/plates), relief brush | Mountain ranges follow plate collisions |
-| 1. Living land | Rivers and lakes; biome fertility and travel cost; race, culture and language defs; name generator; world settings (volatility) | Rivers carve the map; cultures generate distinct names |
+| 0.8 Climate ✅ | Wind-driven rainfall with rain shadows, range-dependent mountain biomes, rainfall/temperature views | Deserts sit in rain shadows and subtropics |
+| 1. Living land | Rivers and lakes (fed by simulated rainfall); biome fertility and travel cost; race, culture and language defs; name generator; world settings (volatility) | Rivers carve the map; cultures generate distinct names |
 | 2. Peoples & settlements | Population groups, growth, migration; settlements founded dynamically; counties as settlement hinterlands; border and settlement rendering | Peoples spread from origins and settle the land into counties |
 | 3. Titles & realms | County → Duchy → Kingdom → Empire; titles formed around counties; realms, vassals, expansion | Kingdoms form and fill the map |
 | 4. Conflict | Diplomacy, armies, war, rebellion, secession, scaled by volatility | Empires rise and fall unattended over 2,000 years |

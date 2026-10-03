@@ -302,6 +302,20 @@ mod tests {
     }
 
     #[test]
+    fn biomes_resolve_relief_ids_and_report_unknown_ones() {
+        let reg = load_str(
+            r#"(reliefs: [(id: "flat"), (id: "mountains")], biomes: [(id: "sea", water: true, elevation: (0.0, 0.6)), (id: "alpine", relief: ["mountains"])])"#,
+        )
+        .unwrap();
+        let alpine = reg.biome(reg.biome_id("alpine").unwrap());
+        assert_eq!(alpine.relief_ids, vec![reg.relief_id("mountains").unwrap()]);
+        assert_eq!(reg.sea_level(), 0.6);
+
+        let bad = load_str(r#"(biomes: [(id: "alpine", relief: ["mountain"])])"#);
+        assert!(bad.unwrap_err().to_string().contains("unknown relief"));
+    }
+
+    #[test]
     fn reports_cycles_unknown_parents_and_fields() {
         let cycle = load_str(r#"(biomes: [(id: "a", parent: "b"), (id: "b", parent: "a")])"#);
         assert!(cycle.unwrap_err().to_string().contains("cycle"));

@@ -9,7 +9,7 @@
 //! proportions, e.g. `elevation: (0.0, 0.55)` makes the lowest 55% of the
 //! world sea, whatever the seed.
 
-use content::{BiomeId, Registry};
+use content::{BiomeId, Registry, Site};
 use std::collections::HashMap;
 
 use content::ReliefId;
@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use sim_core::{Geology, Plate, Terrain, Topology, World, Wrap, rng};
 use tectonics::{PlateLayer, smoothstep};
 
+mod climate;
 mod tectonics;
 
 /// What happens at the map's edges.
@@ -121,6 +122,8 @@ struct Layers {
 struct Land {
     elevation: f64,
     ruggedness: f64,
+    /// Smooth strength of the mountain range here (before ridging).
+    massif: f64,
     plate: tectonics::Site,
     stress: f64,
 }
@@ -184,7 +187,10 @@ impl Layers {
         // Rugged ground follows the crests, so uplift reads as ridgelines
         // with gentler ground between rather than solid massifs.
         let ruggedness = (t.orogeny * (0.2 + 0.8 * crest * crest) * 1.5 + detail.abs() * 0.1).clamp(0.0, 1.0);
-        Land { elevation, ruggedness, plate: t.plate, stress: t.stress }
+        // The greatest collisions reach ~0.8 uplift; old and microplate
+        // ranges stay well below, like the Appalachians beside the Alps.
+        let massif = (t.orogeny / 0.8).clamp(0.0, 1.0);
+        Land { elevation, ruggedness, massif, plate: t.plate, stress: t.stress }
     }
 }
 
@@ -208,9 +214,11 @@ fn noise_bounds(params: &WorldGenParams) -> ([f64; 3], [f64; 3]) {
 /// Raw values for one hex, before normalisation.
 struct Sample {
     elevation: f32,
+    /// Local variation in rainfall (soils, small weather systems), ~[-1, 1].
     moisture: f32,
     warmth: f32,
     ruggedness: f32,
+    massif: f32,
     plate: tectonics::Site,
     stress: f32,
 }
@@ -238,13 +246,15 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 
     let mut terrain = Terrain::new(topology.len());
     let mut geology = Geology::default();
+    let mut variation = Vec::with_capacity(topology.len());
     // Plates are numbered in order of first appearance, so ids are stable.
     let mut plate_ids: HashMap<[i32; 3], u16> = HashMap::new();
     for (i, s) in samples.into_iter().enumerate() {
         terrain.elevation[i] = s.elevation;
-        terrain.moisture[i] = s.moisture;
         terrain.temperature[i] = s.warmth;
         terrain.ruggedness[i] = s.ruggedness;
+        terrain.massif[i] = s.massif;
+        variation.push(s.moisture);
         let next = plate_ids.len() as u16;
         let id = *plate_ids.entry(s.plate.cell).or_insert_with(|| {
             geology.plates.push(Plate { continental: false });
@@ -253,31 +263,70 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         geology.plate.push(id);
         geology.stress.push(s.stress);
     }
+    // Latitude from the climate bands, before altitude cooling.
+    let latitude: Vec<f32> = terrain.temperature.iter().map(|w| 90.0 * (1.0 - w.clamp(0.0, 1.0))).collect();
+
     to_percentiles(&mut terrain.elevation);
-    to_percentiles(&mut terrain.moisture);
-    // The highest ground is broken country even away from plate
-    // boundaries: plateaus and old uplands become at least hills.
-    for (r, e) in terrain.ruggedness.iter_mut().zip(&terrain.elevation) {
-        *r = (*r + smoothstep(0.86, 1.0, *e as f64) as f32 * 0.45).min(1.0);
+    let sea_level = registry.sea_level();
+    let sea: Vec<bool> = terrain.elevation.iter().map(|&e| e < sea_level).collect();
+    for (i, &is_sea) in sea.iter().enumerate() {
+        if is_sea {
+            // Relief and ranges belong to land; seas are flat.
+            terrain.ruggedness[i] = 0.0;
+            terrain.massif[i] = 0.0;
+        } else {
+            // The highest ground is broken country even away from plate
+            // boundaries: plateaus and old uplands become at least hills.
+            let e = terrain.elevation[i] as f64;
+            terrain.ruggedness[i] = (terrain.ruggedness[i] + smoothstep(0.86, 1.0, e) as f32 * 0.45).min(1.0);
+        }
     }
     // Higher and more rugged ground is colder, so ranges carry snow.
     for ((t, e), r) in terrain.temperature.iter_mut().zip(&terrain.elevation).zip(&terrain.ruggedness) {
         *t = (*t - (e - 0.62).max(0.0) * 0.6 - r * 0.12).clamp(0.0, 1.0);
     }
-    terrain.biome = terrain
-        .elevation
-        .par_iter()
-        .zip(&terrain.moisture)
-        .zip(&terrain.temperature)
-        .map(|((&e, &m), &t)| choose_biome(registry, e, m, t))
-        .collect();
-    // Relief is a property of land; seas are flat.
-    for (r, b) in terrain.ruggedness.iter_mut().zip(&terrain.biome) {
-        if registry.biome(*b).water {
-            *r = 0.0;
-        }
-    }
     terrain.relief = terrain.ruggedness.iter().map(|&r| choose_relief(registry, r)).collect();
+
+    // Rainfall from prevailing winds, wrung out by mountains.
+    let height: Vec<f32> = (0..terrain.len())
+        .map(|i| {
+            if sea[i] {
+                0.0
+            } else {
+                (terrain.elevation[i] - sea_level) / (1.0 - sea_level).max(1e-3) + terrain.ruggedness[i] * 0.5
+            }
+        })
+        .collect();
+    let column_step = 0.75 / (3f64.sqrt() / 2.0) / params.height as f64 * params.world_size;
+    let rain = climate::rainfall(&climate::ClimateInput {
+        topology: &topology,
+        sea: &sea,
+        height: &height,
+        latitude: &latitude,
+        temperature: &terrain.temperature,
+        column_step,
+        row_step: params.world_size / params.height as f64,
+    });
+    terrain.moisture = rain.iter().zip(&variation).map(|(r, v)| r * (1.0 + 0.3 * v)).collect();
+    to_percentiles(&mut terrain.moisture);
+
+    terrain.biome = (0..terrain.len())
+        .into_par_iter()
+        .map(|i| {
+            let t = &terrain;
+            choose_biome(
+                registry,
+                Site {
+                    elevation: t.elevation[i],
+                    moisture: t.moisture[i],
+                    temperature: t.temperature[i],
+                    relief: t.relief[i],
+                    massif: t.massif[i],
+                },
+            )
+        })
+        .collect();
+
     // A plate counts as continental if most of it (on this map) is land.
     let mut land = vec![(0u32, 0u32); geology.plates.len()];
     for (plate, biome) in geology.plate.iter().zip(&terrain.biome) {
@@ -351,6 +400,7 @@ fn sample(topology: &Topology, layers: &Layers, params: &WorldGenParams, hex: si
         moisture: moisture as f32,
         warmth: latitude_warmth as f32,
         ruggedness: land.ruggedness as f32,
+        massif: land.massif as f32,
         plate: land.plate,
         stress: land.stress as f32,
     }
@@ -382,12 +432,12 @@ fn choose_relief(registry: &Registry, r: f32) -> ReliefId {
 }
 
 /// The highest-priority biome matching the climate; the first biome if none match.
-fn choose_biome(registry: &Registry, elevation: f32, moisture: f32, temperature: f32) -> BiomeId {
+fn choose_biome(registry: &Registry, site: Site) -> BiomeId {
     registry
         .biomes()
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.matches(elevation, moisture, temperature))
+        .filter(|(_, b)| b.matches(site))
         // `max_by_key` keeps the last maximum; reverse so earlier defs win ties.
         .rev()
         .max_by_key(|(_, b)| b.priority)
@@ -504,8 +554,36 @@ mod tests {
     #[test]
     fn priority_breaks_ties() {
         let reg = registry();
-        assert_eq!(choose_biome(&reg, 0.9, 0.5, 0.05), reg.biome_id("snow").unwrap());
-        assert_eq!(choose_biome(&reg, 0.9, 0.5, 0.5), reg.biome_id("land").unwrap());
+        let site = |elevation, temperature| Site {
+            elevation,
+            moisture: 0.5,
+            temperature,
+            relief: content::ReliefId(0),
+            massif: 0.0,
+        };
+        assert_eq!(choose_biome(&reg, site(0.9, 0.05)), reg.biome_id("snow").unwrap());
+        assert_eq!(choose_biome(&reg, site(0.9, 0.5)), reg.biome_id("land").unwrap());
+    }
+
+    #[test]
+    fn great_ranges_get_mountain_biomes_and_small_ones_keep_theirs() {
+        let reg = content::load_str(
+            r#"(
+                reliefs: [(id: "flat"), (id: "mountains")],
+                biomes: [
+                    (id: "forest"),
+                    (id: "alpine", relief: ["mountains"], massif: (0.4, 1.0), priority: 5),
+                ],
+            )"#,
+        )
+        .unwrap();
+        let mountains = reg.relief_id("mountains").unwrap();
+        let site = |relief, massif| Site { elevation: 0.8, moisture: 0.6, temperature: 0.5, relief, massif };
+        let forest = reg.biome_id("forest").unwrap();
+        let alpine = reg.biome_id("alpine").unwrap();
+        assert_eq!(choose_biome(&reg, site(mountains, 0.8)), alpine, "the Alps");
+        assert_eq!(choose_biome(&reg, site(mountains, 0.2)), forest, "the Appalachians");
+        assert_eq!(choose_biome(&reg, site(content::ReliefId(0), 0.8)), forest, "flat land beside a range");
     }
 
     #[test]

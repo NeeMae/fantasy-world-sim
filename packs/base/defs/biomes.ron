@@ -7,9 +7,15 @@
 // The matching biome with the highest `priority` wins. Ranges default to
 // "anything", so a biome only needs to state what makes it special.
 //
-// Hills and mountains are not biomes: they're relief (see reliefs.ron),
-// layered on top, so a hex can be forested hills or desert mountains.
-// High ranges still turn to tundra and glacier because altitude is cold.
+// Hills and mountains are relief (see reliefs.ron), layered on top, so a
+// hex can be forested hills or desert mountains. Biomes can also ask for a
+// relief and a `massif`: how great the mountain range is, from 0 (none, or
+// old worn-down ranges like the Appalachians) to 1 (great collision ranges
+// like the Himalaya). Small ranges keep the biome of the land around them;
+// great ones get their own.
+//
+// Moisture comes from simulated rainfall: winds carry it in from the sea,
+// and mountains wring it out, leaving dry rain shadows in their lee.
 (
     biomes: [
         // ---- Water ---------------------------------------------------------
@@ -44,6 +50,20 @@
             temperature: (0.72, 1.0), moisture: (0.6, 1.0), priority: 2),
         (id: "swamp", parent: "land_base", name: "Swamp", color: "#536b49",
             elevation: (0.55, 0.6), moisture: (0.85, 1.0), temperature: (0.35, 1.0), priority: 3),
+
+        // ---- Great ranges --------------------------------------------------
+        (id: "mountain_base", abstract: true, parent: "land_base", relief: ["mountains"],
+            massif: (0.35, 1.0), priority: 6),
+
+        // Wet, temperate ranges: high meadows and conifers (the Alps).
+        (id: "alpine", parent: "mountain_base", name: "Alpine", color: "#7f9471",
+            moisture: (0.3, 1.0), temperature: (0.12, 0.75)),
+        // Dry ranges: bare rock and scree (the Rockies' rain-shadow side).
+        (id: "crags", parent: "mountain_base", name: "Crags", color: "#8c7d6c",
+            moisture: (0.0, 0.3)),
+        // The roof of the world (the Himalaya).
+        (id: "snowy_peaks", parent: "mountain_base", name: "Snowy Peaks", color: "#e6ebef",
+            massif: (0.6, 1.0), temperature: (0.0, 0.3), priority: 7),
 
     ],
 )

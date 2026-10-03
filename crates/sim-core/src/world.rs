@@ -13,6 +13,9 @@ pub struct Terrain {
     pub temperature: Vec<f32>,
     /// How broken the land is, mostly from tectonic uplift; decides relief.
     pub ruggedness: Vec<f32>,
+    /// How great the mountain range here is: 0 for none or old worn-down
+    /// ranges, 1 for the greatest collision ranges. Shapes mountain biomes.
+    pub massif: Vec<f32>,
     pub biome: Vec<BiomeId>,
     /// Flat, hills, mountains, ...: layered on top of the biome.
     pub relief: Vec<ReliefId>,
@@ -25,6 +28,7 @@ impl Terrain {
             moisture: vec![0.0; len],
             temperature: vec![0.0; len],
             ruggedness: vec![0.0; len],
+            massif: vec![0.0; len],
             biome: vec![BiomeId::default(); len],
             relief: vec![ReliefId::default(); len],
         }
@@ -98,7 +102,9 @@ impl World {
         h.u64(self.tick);
         h.u64(self.terrain_revision);
         let t = &self.terrain;
-        for v in t.elevation.iter().chain(&t.moisture).chain(&t.temperature).chain(&t.ruggedness) {
+        for v in
+            t.elevation.iter().chain(&t.moisture).chain(&t.temperature).chain(&t.ruggedness).chain(&t.massif)
+        {
             h.u64(v.to_bits() as u64);
         }
         for (b, r) in t.biome.iter().zip(&t.relief) {

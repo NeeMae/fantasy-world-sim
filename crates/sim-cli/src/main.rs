@@ -72,6 +72,10 @@ enum View {
     Elevation,
     /// Tectonic plates and their boundaries.
     Plates,
+    /// Rainfall.
+    Rainfall,
+    /// Temperature.
+    Temperature,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -161,6 +165,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             View::Terrain => MapMode::Terrain,
             View::Elevation => MapMode::Elevation,
             View::Plates => MapMode::Plates,
+            View::Rainfall => MapMode::Rainfall,
+            View::Temperature => MapMode::Temperature,
         };
         let opts = RenderOptions {
             layout: HexLayout { size: args.hex_size },
