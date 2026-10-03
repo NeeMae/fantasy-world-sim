@@ -20,7 +20,7 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 
 use tools::{Hover, PointerOverUi, Selection, ToolState};
-use world_setup::{Content, RegenerateRequest, SIZES, WorldSettings};
+use world_setup::{Climate, Content, RegenerateRequest, SCALES, WorldSettings};
 
 #[derive(Parser)]
 #[command(version, about = "Fantasy world simulator")]
@@ -28,9 +28,15 @@ struct Args {
     /// World seed (random if omitted).
     #[arg(long)]
     seed: Option<u64>,
-    /// Map size preset: small, medium, large or huge.
-    #[arg(long, default_value = "medium")]
-    size: String,
+    /// Detail preset: coarse, normal, fine or "very fine".
+    #[arg(long, default_value = "normal")]
+    scale: String,
+    /// How much of the planet the map shows: 1 is a region, 4+ several continents.
+    #[arg(long, default_value_t = 1.0)]
+    world_size: f64,
+    /// Wrap east-west (a globe). Also switches the climate to pole-to-pole.
+    #[arg(long)]
+    wrap: bool,
     /// Ring the world with ocean instead of letting land run off the edges.
     #[arg(long)]
     ocean_edges: bool,
@@ -48,15 +54,21 @@ fn main() -> AppExit {
             return AppExit::error();
         }
     };
-    let Some(size) = SIZES.iter().position(|(name, ..)| name.eq_ignore_ascii_case(&args.size)) else {
-        eprintln!("error: unknown size {:?}; expected small, medium, large or huge", args.size);
+    let Some(scale) = SCALES.iter().position(|(name, _)| name.eq_ignore_ascii_case(&args.scale)) else {
+        eprintln!("error: unknown scale {:?}; expected coarse, normal, fine or \"very fine\"", args.scale);
         return AppExit::error();
     };
-    let settings = WorldSettings {
-        seed: args.seed.unwrap_or_else(world_setup::random_seed).to_string(),
-        size,
+    let mut settings = WorldSettings {
+        scale,
+        world_size: args.world_size,
+        wrap: args.wrap,
+        climate: if args.wrap { Climate::Globe } else { Climate::Regional },
         edges: if args.ocean_edges { worldgen::EdgeStyle::Ocean } else { worldgen::EdgeStyle::Open },
+        ..Default::default()
     };
+    if let Some(seed) = args.seed {
+        settings.seed = seed.to_string();
+    }
 
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()).set(WindowPlugin {

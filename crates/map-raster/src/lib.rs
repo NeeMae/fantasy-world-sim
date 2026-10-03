@@ -79,11 +79,13 @@ pub struct Image {
 
 const NONE: u32 = u32::MAX;
 
-/// A rectangle of pixels in map-image coordinates.
+/// A rectangle of pixels in map-image coordinates. On a wrapping map it may
+/// extend past the left or right edge (negative `x`, or beyond the width),
+/// meaning it continues on the other side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelRect {
-    pub x: u32,
-    pub y: u32,
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
 }
@@ -135,7 +137,8 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
                 px.copy_from_slice(&[opts.background.0, opts.background.1, opts.background.2, 255]);
                 continue;
             }
-            let (x, y) = (rect.x as usize + rx, rect.y as usize + ry);
+            let x = (rect.x as isize + rx as isize).rem_euclid(map_w as isize) as usize;
+            let y = (rect.y as isize + ry as isize).max(0) as usize;
             let biome = registry.biome(world.terrain.biome[id as usize]);
             let elevation = world.terrain.elevation[id as usize];
 
@@ -163,23 +166,32 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
     rgba
 }
 
-/// The pixel rectangle covering `hexes`, clamped to the map image (with a
-/// little margin for edge effects that reach into neighbouring pixels).
+/// The pixel rectangle covering `hexes`, with a little margin for edge
+/// effects that reach into neighbouring pixels. Clamped to the map image,
+/// except east-west on a wrapping map, where hexes are measured from the
+/// copy nearest the first one so a set straddling the seam stays compact.
 pub fn hexes_bounds(topo: &Topology, layout: &HexLayout, hexes: &[HexId]) -> Option<PixelRect> {
     let (map_w, map_h) = layout.image_size(topo);
+    let wraps = topo.wrap() == Wrap::X;
     let reach = layout.size + 2.0;
     let mut bounds: Option<(f32, f32, f32, f32)> = None;
     for &hex in hexes {
-        let (x, y) = layout.center(topo, hex);
+        let (mut x, y) = layout.center(topo, hex);
+        if let (true, Some(b)) = (wraps, bounds) {
+            let anchor = (b.0 + b.2) / 2.0;
+            x += ((anchor - x) / map_w as f32).round() * map_w as f32;
+        }
         let b = bounds.get_or_insert((x, y, x, y));
         *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
     }
     let (x0, y0, x1, y1) = bounds?;
-    let x0 = (x0 - reach).floor().max(0.0) as u32;
-    let y0 = (y0 - reach).floor().max(0.0) as u32;
-    let x1 = ((x1 + reach).ceil() as u32).min(map_w);
-    let y1 = ((y1 + reach).ceil() as u32).min(map_h);
-    Some(PixelRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) })
+    let (mut x0, mut x1) = ((x0 - reach).floor() as i32, (x1 + reach).ceil() as i32);
+    if !wraps {
+        (x0, x1) = (x0.max(0), x1.min(map_w as i32));
+    }
+    let y0 = ((y0 - reach).floor() as i32).max(0);
+    let y1 = ((y1 + reach).ceil() as i32).min(map_h as i32);
+    Some(PixelRect { x: x0, y: y0, width: (x1 - x0).max(0) as u32, height: (y1 - y0).max(0) as u32 })
 }
 
 /// A transparent RGBA8 overlay tracing the outer edge of a set of hexes,
@@ -206,7 +218,8 @@ pub fn outline(
     }
     let inside: Vec<bool> = (0..w * h)
         .map(|i| {
-            let (x, y) = ((rect.x as usize + i % w) as f32 + 0.5, (rect.y as usize + i / w) as f32 + 0.5);
+            let x = (rect.x as isize + (i % w) as isize) as f32 + 0.5;
+            let y = (rect.y as isize + (i / w) as isize) as f32 + 0.5;
             layout.hex_at(topo, x, y).is_some_and(|id| member[id.index()])
         })
         .collect();
@@ -308,15 +321,30 @@ mod tests {
         for i in 0..(o.rect.width * o.rect.height) as usize {
             if o.rgba[i * 4 + 3] != 0 {
                 drawn += 1;
-                let x = (o.rect.x + i as u32 % o.rect.width) as f32 + 0.5;
-                let y = (o.rect.y + i as u32 / o.rect.width) as f32 + 0.5;
+                let x = (o.rect.x + (i as u32 % o.rect.width) as i32) as f32 + 0.5;
+                let y = (o.rect.y + (i as u32 / o.rect.width) as i32) as f32 + 0.5;
                 assert_eq!(layout.hex_at(&topo, x, y), Some(hex));
             }
         }
         assert!(drawn > 20, "an outline was drawn ({drawn} px)");
         let (cx, cy) = layout.center(&topo, hex);
-        let (lx, ly) = (cx as u32 - o.rect.x, cy as u32 - o.rect.y);
+        let (lx, ly) = ((cx as i32 - o.rect.x) as u32, (cy as i32 - o.rect.y) as u32);
         assert_eq!(o.rgba[((ly * o.rect.width + lx) * 4 + 3) as usize], 0, "the middle is see-through");
+    }
+
+    #[test]
+    fn bounds_stay_compact_across_the_seam() {
+        let topo = Topology::new(40, 20, Wrap::X);
+        let layout = HexLayout::default();
+        let (map_w, _) = layout.image_size(&topo);
+        let brush = topo.within(topo.at(0, 10).unwrap(), 2);
+        let r = hexes_bounds(&topo, &layout, &brush).unwrap();
+        assert!(r.width < map_w / 4, "brush at the seam isn't stretched across the map ({r:?})");
+        assert!(r.x < 0 || r.x + r.width as i32 > map_w as i32, "it extends past an edge ({r:?})");
+        // Every brush hex is traced within that compact rectangle.
+        let o = outline(&topo, &layout, &brush, 1, [255; 4]).unwrap();
+        assert_eq!(o.rect, r);
+        assert!(o.rgba.chunks(4).filter(|p| p[3] != 0).count() > 30);
     }
 
     #[test]

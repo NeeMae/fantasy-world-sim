@@ -39,6 +39,8 @@ pub struct Snapshot {
     /// since cloning it every tick would be wasteful.
     pub world: Arc<World>,
     pub ticks_per_second: f64,
+    /// How many edits can be undone and redone.
+    pub undo_redo: (usize, usize),
 }
 
 struct Shared {
@@ -62,6 +64,7 @@ impl SimThread {
                 tick: sim.world().tick,
                 world: Arc::new(sim.world().clone()),
                 ticks_per_second: 0.0,
+                undo_redo: (0, 0),
             }),
             changed: Mutex::new(Vec::new()),
         });
@@ -165,6 +168,7 @@ fn publish(sim: &mut Simulation, shared: &Shared) {
     {
         let mut snap = shared.snapshot.lock().expect("view thread panicked");
         snap.tick = sim.world().tick;
+        snap.undo_redo = sim.undo_redo_depth();
         if !changed.is_empty() {
             snap.world = Arc::new(sim.world().clone());
         }

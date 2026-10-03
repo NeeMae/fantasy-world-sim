@@ -33,9 +33,17 @@ pub struct MapView {
     chunks: Vec<Chunk>,
     /// Image size in pixels; the map is centred on the world origin.
     pub size: Vec2,
+    /// East-west wrapping: the map is drawn three times side by side and the
+    /// camera is kept over the middle copy, so panning never reaches an edge.
+    pub wrap: bool,
 }
 
 impl MapView {
+    /// Horizontal offsets, in map widths, of each drawn copy of the map.
+    fn copies(&self) -> &'static [f32] {
+        if self.wrap { &[-1.0, 0.0, 1.0] } else { &[0.0] }
+    }
+
     /// The hex under a world-space position.
     pub fn hex_at(&self, world: &World, pos: Vec2) -> Option<HexId> {
         let (px, py) = self.to_pixels(pos);
@@ -72,30 +80,37 @@ pub fn spawn(
     let options = RenderOptions::default();
     let (w, h) = options.layout.image_size(&world.topology);
     let size = Vec2::new(w as f32, h as f32);
-    let mut view = MapView { registry, options, chunks: Vec::new(), size };
+    let wrap = world.topology.wrap() == sim_core::Wrap::X;
+    let mut view = MapView { registry, options, chunks: Vec::new(), size, wrap };
 
     for cy in (0..h).step_by(CHUNK as usize) {
         for cx in (0..w).step_by(CHUNK as usize) {
-            let rect = PixelRect { x: cx, y: cy, width: CHUNK.min(w - cx), height: CHUNK.min(h - cy) };
+            let rect =
+                PixelRect { x: cx as i32, y: cy as i32, width: CHUNK.min(w - cx), height: CHUNK.min(h - cy) };
             let rgba = map_raster::render_rect(world, &view.registry, &view.options, rect);
             let image = images.add(make_image(rect.width, rect.height, rgba));
-            commands.spawn((
-                Sprite::from_image(image.clone()),
-                Transform::from_translation(view.rect_center(rect).extend(0.0)),
-                MapEntity,
-            ));
+            for &copy in view.copies() {
+                let pos = view.rect_center(rect) + Vec2::X * copy * size.x;
+                commands.spawn((
+                    Sprite::from_image(image.clone()),
+                    Transform::from_translation(pos.extend(0.0)),
+                    MapEntity,
+                ));
+            }
             view.chunks.push(Chunk { rect, image });
         }
     }
 
     for kind in [OutlineKind::Hover, OutlineKind::Selection] {
-        commands.spawn((
-            Sprite::default(),
-            Transform::from_xyz(0.0, 0.0, kind.z()),
-            Visibility::Hidden,
-            Outline { kind, key: None },
-            MapEntity,
-        ));
+        for &copy in view.copies() {
+            commands.spawn((
+                Sprite::default(),
+                Transform::from_xyz(0.0, 0.0, kind.z()),
+                Visibility::Hidden,
+                Outline { kind, copy, key: None },
+                MapEntity,
+            ));
+        }
     }
     commands.insert_resource(view);
     size
@@ -129,7 +144,10 @@ pub fn redraw_changes(sim: Res<SimThread>, view: Res<MapView>, mut images: ResMu
 }
 
 fn overlaps(a: PixelRect, b: PixelRect) -> bool {
-    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    a.x < b.x + b.width as i32
+        && b.x < a.x + a.width as i32
+        && a.y < b.y + b.height as i32
+        && b.y < a.y + a.height as i32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -158,6 +176,8 @@ impl OutlineKind {
 #[derive(Component)]
 pub struct Outline {
     kind: OutlineKind,
+    /// Which copy of a wrapping map this is drawn over, in map widths.
+    copy: f32,
     /// The hexes and line thickness currently drawn.
     key: Option<(Vec<HexId>, u32)>,
 }
@@ -180,6 +200,7 @@ pub fn update_outlines(
     };
     let thickness = (zoom.ceil() as u32).clamp(1, 4);
     let world = sim.snapshot().world;
+    let mut built: Vec<(OutlineKind, Handle<Image>, PixelRect)> = Vec::new();
 
     for (mut outline, mut sprite, mut transform, mut visibility) in &mut outlines {
         let hexes = match outline.kind {
@@ -195,18 +216,28 @@ pub fn update_outlines(
         if outline.key.as_ref() == Some(&key) {
             continue;
         }
-        let Some(drawn) = map_raster::outline(
-            &world.topology,
-            &view.options.layout,
-            &key.0,
-            thickness,
-            outline.kind.color(),
-        ) else {
-            continue;
+        // Copies over a wrapping map share one traced image.
+        let (image, rect) = match built.iter().find(|(kind, ..)| *kind == outline.kind) {
+            Some((_, image, rect)) => (image.clone(), *rect),
+            None => {
+                let Some(drawn) = map_raster::outline(
+                    &world.topology,
+                    &view.options.layout,
+                    &key.0,
+                    thickness,
+                    outline.kind.color(),
+                ) else {
+                    continue;
+                };
+                let image = images.add(make_image(drawn.rect.width, drawn.rect.height, drawn.rgba));
+                built.push((outline.kind, image.clone(), drawn.rect));
+                (image, drawn.rect)
+            }
         };
         // Replacing the handle frees the previous outline image.
-        sprite.image = images.add(make_image(drawn.rect.width, drawn.rect.height, drawn.rgba));
-        transform.translation = view.rect_center(drawn.rect).extend(outline.kind.z());
+        sprite.image = image;
+        let pos = view.rect_center(rect) + Vec2::X * outline.copy * view.size.x;
+        transform.translation = pos.extend(outline.kind.z());
         *visibility = Visibility::Visible;
         outline.key = Some(key);
     }

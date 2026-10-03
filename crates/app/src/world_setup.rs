@@ -5,28 +5,102 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use content::Registry;
 use sim_core::{Simulation, Wrap};
-use worldgen::{EdgeStyle, WorldGenParams};
+use worldgen::{EdgeStyle, Latitudes, WorldGenParams};
 
 use crate::camera::{self, MapCamera};
 use crate::map_view::{self, MapEntity};
 use crate::sim_thread::SimThread;
 use crate::tools::{Hover, Selection};
 
-/// Map size presets: name, width, height (in hexes).
-pub const SIZES: [(&str, u32, u32); 4] =
-    [("Small", 256, 160), ("Medium", 512, 320), ("Large", 768, 480), ("Huge", 1024, 640)];
+/// Detail presets: how many hex rows tall the map is. The same world is
+/// drawn at every scale, just with finer or coarser hexes.
+pub const SCALES: [(&str, u32); 4] = [("Coarse", 160), ("Normal", 320), ("Fine", 480), ("Very fine", 640)];
+
+/// Canvas shapes, as on-screen width : height.
+pub const ASPECTS: [(&str, f64); 6] =
+    [("1:1", 1.0), ("4:3", 4.0 / 3.0), ("3:2", 1.5), ("16:9", 16.0 / 9.0), ("2:1", 2.0), ("3:1", 3.0)];
+
+/// Largest custom canvas edge, in hexes.
+pub const MAX_CANVAS: u32 = 4096;
+/// Above this many hexes, warn that the world may be slow.
+pub const LARGE_WORLD: u64 = 1_000_000;
+
+/// Climate bands across the map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Climate {
+    /// Cool north to warm south, like a regional map.
+    Regional,
+    /// Pole to pole with the equator across the middle.
+    Globe,
+}
 
 /// Loaded content, shared by every world generated this session.
 #[derive(Resource)]
 pub struct Content(pub Arc<Registry>);
 
 /// The world-generation form in the UI.
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct WorldSettings {
     pub seed: String,
-    /// Index into [`SIZES`].
-    pub size: usize,
+    /// Index into [`SCALES`].
+    pub scale: usize,
+    /// Index into [`ASPECTS`].
+    pub aspect: usize,
+    /// Explicit width × height in hexes, overriding scale and aspect.
+    pub custom: Option<(u32, u32)>,
+    pub world_size: f64,
+    pub continent_size: f64,
     pub edges: EdgeStyle,
+    pub wrap: bool,
+    pub climate: Climate,
+}
+
+impl Default for WorldSettings {
+    fn default() -> Self {
+        WorldSettings {
+            seed: random_seed().to_string(),
+            scale: 1,
+            aspect: 2,
+            custom: None,
+            world_size: 1.0,
+            continent_size: 1.0,
+            edges: EdgeStyle::Open,
+            wrap: false,
+            climate: Climate::Regional,
+        }
+    }
+}
+
+impl WorldSettings {
+    /// Canvas size in hexes. Widths are kept even so wrapping always works.
+    pub fn dimensions(&self) -> (u32, u32) {
+        let (w, h) = self.custom.unwrap_or_else(|| {
+            let rows = SCALES[self.scale].1;
+            // A flat-topped hex grid is ~0.866 as wide on screen as its
+            // column count suggests relative to its rows.
+            let cols = (ASPECTS[self.aspect].1 * rows as f64 / 0.866).round() as u32;
+            (cols, rows)
+        });
+        ((w.clamp(2, MAX_CANVAS) + 1) & !1, h.clamp(2, MAX_CANVAS))
+    }
+
+    pub fn params(&self) -> Result<WorldGenParams, String> {
+        let seed = self.seed.trim().parse::<u64>().map_err(|_| format!("invalid seed {:?}", self.seed))?;
+        let (width, height) = self.dimensions();
+        Ok(WorldGenParams {
+            seed,
+            width,
+            height,
+            wrap: if self.wrap { Wrap::X } else { Wrap::None },
+            edges: self.edges,
+            world_size: self.world_size,
+            continent_scale: self.continent_size,
+            latitudes: match self.climate {
+                Climate::Regional => Latitudes::default(),
+                Climate::Globe => Latitudes::Globe,
+            },
+        })
+    }
 }
 
 #[derive(Message)]
@@ -48,12 +122,12 @@ pub fn start_world(
     content: &Content,
     settings: &WorldSettings,
 ) -> Result<Vec2, String> {
-    let seed =
-        settings.seed.trim().parse::<u64>().map_err(|_| format!("invalid seed {:?}", settings.seed))?;
-    let (_, width, height) = SIZES[settings.size];
-    let params = WorldGenParams { seed, width, height, wrap: Wrap::None, edges: settings.edges, ..default() };
+    let params = settings.params()?;
     let world = worldgen::generate(&params, &content.0).map_err(|e| e.to_string())?;
-    info!("generated {width}×{height} world with seed {seed}");
+    info!(
+        "generated {}×{} world with seed {} (world size {}, wrap {})",
+        params.width, params.height, params.seed, params.world_size, settings.wrap
+    );
     let size = map_view::spawn(commands, images, content.0.clone(), &world);
     // Replacing the resource drops the old handle, which stops the old thread.
     commands.insert_resource(SimThread::spawn(Simulation::new(world, content.0.clone())));

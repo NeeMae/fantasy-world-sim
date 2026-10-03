@@ -2,11 +2,24 @@ use std::sync::Arc;
 
 use content::Registry;
 
-use crate::{Chronicle, Command, EventKind, HexId, World};
+use content::BiomeId;
+
+use crate::{Chronicle, Command, EditId, EventKind, HexId, World};
 
 /// The largest brush a single command may use, to bound the work one
 /// (possibly untrusted) command can cause.
 pub const MAX_RESHAPE_RADIUS: u32 = 64;
+
+/// How many edits can be undone.
+pub const UNDO_DEPTH: usize = 100;
+
+/// One undoable edit: every hex it changed, with its biome before and after,
+/// in the order the changes were made.
+#[derive(Clone, Debug)]
+struct Edit {
+    id: EditId,
+    changes: Vec<(HexId, BiomeId, BiomeId)>,
+}
 
 /// Owns the world and advances it one tick (one month) at a time.
 pub struct Simulation {
@@ -16,6 +29,10 @@ pub struct Simulation {
     pending: Vec<Command>,
     /// Hexes whose terrain changed since the last [`Simulation::take_changed_hexes`].
     changed: Vec<HexId>,
+    /// Edits that can be undone, oldest first, and ones undone that can be
+    /// redone. Part of the state: replaying the command log rebuilds them.
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
 }
 
 impl Simulation {
@@ -26,6 +43,8 @@ impl Simulation {
             chronicle: Chronicle::default(),
             pending: Vec::new(),
             changed: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -56,7 +75,7 @@ impl Simulation {
         let tick = self.world.tick;
         for command in std::mem::take(&mut self.pending) {
             match command {
-                Command::Reshape { center, radius, biome } => {
+                Command::Reshape { center, radius, biome, edit } => {
                     // Commands come from outside; ignore ones that don't make sense.
                     if !self.world.contains(center)
                         || biome.0 as usize >= self.registry.biomes().len()
@@ -64,22 +83,67 @@ impl Simulation {
                     {
                         continue;
                     }
-                    let mut hexes_changed = 0;
+                    let mut changes = Vec::new();
                     for hex in self.world.topology.within(center, radius) {
-                        let slot = &mut self.world.terrain.biome[hex.index()];
-                        if *slot != biome {
-                            *slot = biome;
-                            self.changed.push(hex);
-                            hexes_changed += 1;
+                        let before = self.world.terrain.biome[hex.index()];
+                        if before != biome {
+                            changes.push((hex, before, biome));
                         }
                     }
-                    if hexes_changed > 0 {
-                        self.world.terrain_revision += 1;
-                        self.chronicle.record(
-                            tick,
-                            EventKind::TerrainReshaped { center, radius, to: biome, hexes_changed },
-                        );
+                    if changes.is_empty() {
+                        continue;
                     }
+                    self.chronicle.record(
+                        tick,
+                        EventKind::TerrainReshaped {
+                            center,
+                            radius,
+                            to: biome,
+                            hexes_changed: changes.len() as u32,
+                        },
+                    );
+                    self.set_biomes(changes.iter().map(|&(hex, _, after)| (hex, after)));
+                    self.journal(edit, changes);
+                }
+                Command::Undo => {
+                    if let Some(edit) = self.undo.pop() {
+                        self.set_biomes(edit.changes.iter().rev().map(|&(hex, before, _)| (hex, before)));
+                        self.redo.push(edit);
+                    }
+                }
+                Command::Redo => {
+                    if let Some(edit) = self.redo.pop() {
+                        self.set_biomes(edit.changes.iter().map(|&(hex, _, after)| (hex, after)));
+                        self.undo.push(edit);
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many edits can currently be undone and redone.
+    pub fn undo_redo_depth(&self) -> (usize, usize) {
+        (self.undo.len(), self.redo.len())
+    }
+
+    fn set_biomes(&mut self, changes: impl Iterator<Item = (HexId, BiomeId)>) {
+        for (hex, biome) in changes {
+            self.world.terrain.biome[hex.index()] = biome;
+            self.changed.push(hex);
+        }
+        self.world.terrain_revision += 1;
+    }
+
+    /// Records changes under `edit`, merging into the latest edit if it has
+    /// the same id. Any new edit makes earlier undone ones unrecoverable.
+    fn journal(&mut self, edit: EditId, changes: Vec<(HexId, BiomeId, BiomeId)>) {
+        self.redo.clear();
+        match self.undo.last_mut() {
+            Some(last) if last.id == edit => last.changes.extend(changes),
+            _ => {
+                self.undo.push(Edit { id: edit, changes });
+                if self.undo.len() > UNDO_DEPTH {
+                    self.undo.remove(0);
                 }
             }
         }
@@ -120,7 +184,11 @@ mod tests {
     }
 
     fn reshape(center: u32, radius: u32, biome: u16) -> Command {
-        Command::Reshape { center: HexId(center), radius, biome: BiomeId(biome) }
+        stroke(center, radius, biome, center as u64)
+    }
+
+    fn stroke(center: u32, radius: u32, biome: u16, edit: u64) -> Command {
+        Command::Reshape { center: HexId(center), radius, biome: BiomeId(biome), edit: EditId(edit) }
     }
 
     #[test]
@@ -158,10 +226,49 @@ mod tests {
     fn brush_reshapes_an_area() {
         let mut s = sim(1);
         let center = s.world().topology.at(4, 3).unwrap();
-        s.submit(Command::Reshape { center, radius: 1, biome: BiomeId(1) });
+        s.submit(Command::Reshape { center, radius: 1, biome: BiomeId(1), edit: EditId(0) });
         s.apply_pending();
         let land = s.world().terrain.biome.iter().filter(|&&b| b == BiomeId(1)).count();
         assert_eq!(land, 7);
+    }
+
+    #[test]
+    fn undo_reverts_a_whole_stroke_and_redo_reapplies_it() {
+        let mut s = sim(1);
+        let original = s.world().state_hash();
+        // One stroke of overlapping stamps, then a second stroke.
+        for center in [10, 11, 12] {
+            s.submit(stroke(center, 1, 1, 7));
+        }
+        s.apply_pending();
+        let after_first = s.world().terrain.biome.clone();
+        s.submit(stroke(30, 0, 1, 8));
+        s.apply_pending();
+        assert_eq!(s.undo_redo_depth(), (2, 0));
+
+        s.submit(Command::Undo);
+        s.apply_pending();
+        assert_eq!(s.world().terrain.biome, after_first, "second stroke undone");
+        s.submit(Command::Undo);
+        s.apply_pending();
+        assert!(s.world().terrain.biome.iter().all(|&b| b == BiomeId(0)), "first stroke undone");
+        assert_eq!(s.undo_redo_depth(), (0, 2));
+
+        s.submit(Command::Redo);
+        s.apply_pending();
+        assert_eq!(s.world().terrain.biome, after_first);
+
+        // A new edit discards what's left to redo.
+        s.submit(stroke(40, 0, 1, 9));
+        s.apply_pending();
+        assert_eq!(s.undo_redo_depth(), (2, 0));
+        for _ in 0..2 {
+            s.submit(Command::Undo);
+        }
+        s.submit(Command::Undo); // nothing left: ignored
+        s.apply_pending();
+        assert!(s.world().terrain.biome.iter().all(|&b| b == BiomeId(0)));
+        assert_ne!(s.world().state_hash(), original, "revision still advanced");
     }
 
     #[test]

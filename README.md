@@ -15,7 +15,8 @@ Requires a recent stable Rust toolchain. On Linux, Bevy also needs
 
 ```sh
 # Desktop app (run from the repository root so it finds packs/base)
-cargo run --release -p app -- --seed 42 --size medium
+cargo run --release -p app -- --seed 42
+cargo run --release -p app -- --seed 3 --world-size 4 --wrap   # a whole planet
 
 # Headless: generate, simulate 100 years, export the map as a PNG
 cargo run --release -p sim-cli -- --seed 42 --years 100 --png world.png
@@ -30,12 +31,23 @@ App controls:
 | Left click | Use the current tool |
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
+| Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
 | Space, 1–5 | Pause/resume, speed |
 
-The World panel regenerates the map from a seed, size preset and edge
-style: **Open** (the map is a window onto a larger world, so land runs off
-the edges) or **Ocean** (a self-contained world ringed by sea). On the
-command line, pass `--ocean-edges` to the app or `--edges ocean` to `sim-cli`.
+The World panel generates a new world from:
+
+| Setting | Effect |
+|---|---|
+| World size | How much of the planet the map shows, from a *Region* (one sea and its shores) to a *Planet* |
+| Continents | Fewer, bigger landmasses or more, smaller ones |
+| Scale | How finely the world is divided into hexes; the geography stays the same |
+| Canvas | Aspect ratio, or a custom width × height in hexes |
+| Edges | *Open*: land runs off the map. *Ocean*: the world is ringed by sea |
+| Wrap | East–west wrapping, for a globe you can pan around forever |
+| Climate | *Regional* (cool north, warm south) or *Globe* (pole to pole) |
+
+`sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
+`--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`).
 
 ## Layout
 

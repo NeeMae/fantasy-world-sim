@@ -12,7 +12,7 @@ pub mod time;
 pub mod world;
 
 pub use chronicle::{Chronicle, Entry, EventKind};
-pub use command::Command;
+pub use command::{Command, EditId};
 pub use hex::{Axial, HexId, Topology, Wrap, round_axial};
 pub use sim::Simulation;
 pub use time::Date;

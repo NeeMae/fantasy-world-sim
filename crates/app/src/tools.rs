@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use content::BiomeId;
-use sim_core::{Command, HexId, World};
+use sim_core::{Command, EditId, HexId, World};
 
 use crate::map_view::MapView;
 use crate::sim_thread::SimThread;
@@ -22,11 +22,13 @@ pub struct ToolState {
     pub tool: Tool,
     pub brush_biome: BiomeId,
     pub brush_radius: u32,
+    /// Id for the next brush stroke, so each stroke is one undo step.
+    next_edit: u64,
 }
 
 impl Default for ToolState {
     fn default() -> Self {
-        ToolState { tool: Tool::Inspect, brush_biome: BiomeId(0), brush_radius: 2 }
+        ToolState { tool: Tool::Inspect, brush_biome: BiomeId(0), brush_radius: 2, next_edit: 0 }
     }
 }
 
@@ -100,15 +102,16 @@ pub fn use_tool(
     windows: Query<&Window>,
     over_ui: Res<PointerOverUi>,
     hover: Res<Hover>,
-    tools: Res<ToolState>,
     sim: Res<SimThread>,
+    mut tools: ResMut<ToolState>,
     mut selection: ResMut<Selection>,
     // A stroke only counts if it started on the map, and only paints each
     // hex once as the pointer moves.
-    mut stroke: Local<Option<Option<HexId>>>,
+    mut stroke: Local<Option<(EditId, Option<HexId>)>>,
 ) {
     if buttons.just_pressed(MouseButton::Left) && !over_ui.blocks(cursor(&windows)) {
-        *stroke = Some(None);
+        tools.next_edit += 1;
+        *stroke = Some((EditId(tools.next_edit), None));
         if tools.tool == Tool::Inspect {
             selection.0 = hover.0;
         }
@@ -121,7 +124,7 @@ pub fn use_tool(
         return;
     }
     let paint = (stroke.as_mut(), tools.tool, hover.0);
-    let (Some(last), Tool::Paint, Some(hex)) = paint else { return };
+    let (Some((edit, last)), Tool::Paint, Some(hex)) = paint else { return };
     if *last == Some(hex) {
         return;
     }
@@ -131,7 +134,12 @@ pub fn use_tool(
         None => vec![hex],
     };
     for center in path {
-        sim.submit(Command::Reshape { center, radius: tools.brush_radius, biome: tools.brush_biome });
+        sim.submit(Command::Reshape {
+            center,
+            radius: tools.brush_radius,
+            biome: tools.brush_biome,
+            edit: *edit,
+        });
     }
     *last = Some(hex);
     if released {

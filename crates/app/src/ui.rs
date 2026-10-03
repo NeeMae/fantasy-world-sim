@@ -4,13 +4,15 @@ use bevy::prelude::*;
 use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiContexts, egui};
 use content::BiomeId;
-use sim_core::Date;
+use sim_core::{Command, Date};
 use worldgen::EdgeStyle;
 
 use crate::map_view::MapView;
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
 use crate::tools::{Hover, MAX_BRUSH_RADIUS, PointerOverUi, Selection, Tool, ToolState};
-use crate::world_setup::{RegenerateRequest, SIZES, WorldSettings};
+use crate::world_setup::{
+    ASPECTS, Climate, LARGE_WORLD, MAX_CANVAS, RegenerateRequest, SCALES, WorldSettings,
+};
 
 pub fn panels(
     mut contexts: EguiContexts,
@@ -61,12 +63,12 @@ pub fn panels(
         egui::ScrollArea::vertical().show(ui, |ui| {
             world_section(ui, &mut settings, &mut regenerate, world);
             ui.separator();
-            tools_section(ui, &mut tools, &view);
+            tools_section(ui, &mut tools, &view, &sim, snap.undo_redo);
             ui.separator();
             inspector_section(ui, &selection, &view, world);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo");
         });
     });
 
@@ -84,10 +86,11 @@ fn world_section(
 ) {
     ui.heading("World");
     ui.small(format!(
-        "Current: seed {} · {}×{} hexes",
+        "Current: seed {} · {}×{} hexes{}",
         world.seed,
         world.topology.width(),
-        world.topology.height()
+        world.topology.height(),
+        if world.topology.wrap() == sim_core::Wrap::X { " · wraps" } else { "" }
     ));
     egui::Grid::new("worldgen").num_columns(2).show(ui, |ui| {
         ui.label("Seed");
@@ -98,22 +101,98 @@ fn world_section(
             }
         });
         ui.end_row();
-        ui.label("Size");
-        egui::ComboBox::from_id_salt("size").selected_text(SIZES[settings.size].0).show_ui(ui, |ui| {
-            for (i, (name, w, h)) in SIZES.iter().enumerate() {
-                ui.selectable_value(&mut settings.size, i, format!("{name} ({w}×{h})"));
-            }
+
+        ui.label("World size").on_hover_text("How much of the planet the map shows");
+        ui.add(
+            egui::Slider::new(&mut settings.world_size, 0.5..=6.0)
+                .step_by(0.25)
+                .custom_formatter(|v, _| world_size_name(v).to_string()),
+        );
+        ui.end_row();
+
+        ui.label("Continents").on_hover_text("Larger gives fewer, bigger landmasses");
+        ui.add(egui::Slider::new(&mut settings.continent_size, 0.5..=3.0).step_by(0.1));
+        ui.end_row();
+
+        ui.label("Scale")
+            .on_hover_text("How finely the world is divided into hexes; the geography stays the same");
+        ui.add_enabled_ui(settings.custom.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("scale").selected_text(SCALES[settings.scale].0).show_ui(ui, |ui| {
+                for (i, (name, rows)) in SCALES.iter().enumerate() {
+                    ui.selectable_value(&mut settings.scale, i, format!("{name} ({rows} rows)"));
+                }
+            });
         });
         ui.end_row();
+
+        ui.label("Canvas");
+        ui.add_enabled_ui(settings.custom.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("aspect").selected_text(ASPECTS[settings.aspect].0).show_ui(
+                ui,
+                |ui| {
+                    for (i, (name, _)) in ASPECTS.iter().enumerate() {
+                        ui.selectable_value(&mut settings.aspect, i, *name);
+                    }
+                },
+            );
+        });
+        ui.end_row();
+
+        ui.label("");
+        let mut custom = settings.custom.is_some();
+        if ui.checkbox(&mut custom, "Custom size").changed() {
+            settings.custom = custom.then(|| settings.dimensions());
+        }
+        ui.end_row();
+        if let Some((w, h)) = settings.custom.as_mut() {
+            ui.label("");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(w).range(2..=MAX_CANVAS).speed(4));
+                ui.label("×");
+                ui.add(egui::DragValue::new(h).range(2..=MAX_CANVAS).speed(4));
+            });
+            ui.end_row();
+        }
+
         ui.label("Edges");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut settings.edges, EdgeStyle::Open, "Open")
                 .on_hover_text("Land runs off the map, as if it were part of a larger world");
             ui.selectable_value(&mut settings.edges, EdgeStyle::Ocean, "Ocean")
-                .on_hover_text("The world is ringed by sea");
+                .on_hover_text("The world is ringed by sea (north and south only when wrapping)");
+        });
+        ui.end_row();
+
+        ui.label("Wrap");
+        if ui
+            .checkbox(&mut settings.wrap, "East–west")
+            .on_hover_text("A globe: travel off the east edge and arrive in the west")
+            .changed()
+        {
+            // A wrapped world is usually a whole planet.
+            settings.climate = if settings.wrap { Climate::Globe } else { Climate::Regional };
+        }
+        ui.end_row();
+
+        ui.label("Climate");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut settings.climate, Climate::Regional, "Regional")
+                .on_hover_text("Cool north to warm south");
+            ui.selectable_value(&mut settings.climate, Climate::Globe, "Globe")
+                .on_hover_text("Pole to pole, with the equator across the middle");
         });
         ui.end_row();
     });
+
+    let (w, h) = settings.dimensions();
+    let hexes = w as u64 * h as u64;
+    ui.small(format!("New world: {w}×{h} = {hexes} hexes"));
+    if hexes > LARGE_WORLD {
+        ui.colored_label(
+            egui::Color32::from_rgb(230, 180, 80),
+            "Very large: generation and drawing may be slow.",
+        );
+    }
     let valid = settings.seed.trim().parse::<u64>().is_ok();
     if ui.add_enabled(valid, egui::Button::new("Regenerate world")).clicked() {
         regenerate.write(RegenerateRequest);
@@ -123,11 +202,40 @@ fn world_section(
     }
 }
 
-fn tools_section(ui: &mut egui::Ui, tools: &mut ToolState, view: &MapView) {
+fn world_size_name(v: f64) -> String {
+    let name = match v {
+        v if v < 1.5 => "Region",
+        v if v < 2.5 => "Subcontinent",
+        v if v < 4.0 => "Continent",
+        _ => "Planet",
+    };
+    format!("{v:.2} · {name}")
+}
+
+fn tools_section(
+    ui: &mut egui::Ui,
+    tools: &mut ToolState,
+    view: &MapView,
+    sim: &SimThread,
+    undo_redo: (usize, usize),
+) {
     ui.heading("Tools");
     ui.horizontal(|ui| {
         ui.selectable_value(&mut tools.tool, Tool::Inspect, "Inspect [I]");
         ui.selectable_value(&mut tools.tool, Tool::Paint, "Paint [B]");
+    });
+    ui.horizontal(|ui| {
+        let (undo, redo) = undo_redo;
+        if ui.add_enabled(undo > 0, egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
+            sim.submit(Command::Undo);
+        }
+        if ui
+            .add_enabled(redo > 0, egui::Button::new("Redo"))
+            .on_hover_text("Ctrl+Shift+Z or Ctrl+Y")
+            .clicked()
+        {
+            sim.submit(Command::Redo);
+        }
     });
     if tools.tool != Tool::Paint {
         return;
@@ -204,5 +312,16 @@ pub fn hotkeys(
     }
     if keys.just_pressed(KeyCode::BracketRight) {
         tools.brush_radius = (tools.brush_radius + 1).min(MAX_BRUSH_RADIUS);
+    }
+    // A modifier released this same frame still counts as held, so a fast
+    // tap of a shortcut isn't missed on a slow frame.
+    let held = |pair: [KeyCode; 2]| keys.any_pressed(pair) || keys.any_just_released(pair);
+    let ctrl = held([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = held([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if ctrl && keys.just_pressed(KeyCode::KeyZ) {
+        sim.submit(if shift { Command::Redo } else { Command::Undo });
+    }
+    if ctrl && keys.just_pressed(KeyCode::KeyY) {
+        sim.submit(Command::Redo);
     }
 }

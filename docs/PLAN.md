@@ -92,8 +92,15 @@ trivially serialisable.
   the coast, plus a thin guaranteed band of sea at the border.
 - **Shapes:** low-frequency continents plus detail, domain-warped so
   coastlines swirl instead of forming round blobs.
-- **Climate:** a regional map runs from a cool north to a warm south by
-  default; a pole-to-pole globe is an option (for cylindrical worlds later).
+- **World size vs scale:** *world size* is how much of the planet the map
+  shows (region → planet); *scale* is how many hexes it's drawn with. The
+  same seed gives the same geography at any scale, and noise detail finer
+  than about three hexes is skipped.
+- **Wrap:** optional east-west wrapping samples noise on a cylinder, so the
+  seam is invisible; the app draws three copies and keeps the camera over
+  the middle one.
+- **Climate:** a regional map runs from a cool north to a warm south; a
+  wrapped planet defaults to pole to pole.
 
 ## World model
 
@@ -225,7 +232,8 @@ tileset is a drop-in replacement.
 | Phase | Goal | Done when |
 |---|---|---|
 | 0. Skeleton ✅ | Cargo workspace, headless tick loop, seeded RNG, Bevy viewer, CI | `sim-cli` runs N ticks; app shows a pannable/zoomable hex map |
-| 0.5 Editor basics ✅ | Hex outlines, terrain brush, instant god powers, regenerate | Worlds can be rerolled and reshaped comfortably |
+| 0.5 Editor basics ✅ | Hex outlines, terrain brush with undo/redo, instant god powers, regenerate | Worlds can be rerolled and reshaped comfortably |
+| 0.6 World shape ✅ | Open/ocean edges, world size vs scale, custom canvas, east-west wrap | Region maps through wrapped planets from one generator |
 | 1. Living land | Rivers and lakes; biome fertility and travel cost; race, culture and language defs; name generator; world settings (volatility) | Rivers carve the map; cultures generate distinct names |
 | 2. Peoples & settlements | Population groups, growth, migration; settlements founded dynamically; counties as settlement hinterlands; border and settlement rendering | Peoples spread from origins and settle the land into counties |
 | 3. Titles & realms | County → Duchy → Kingdom → Empire; titles formed around counties; realms, vassals, expansion | Kingdoms form and fill the map |
@@ -234,7 +242,6 @@ tileset is a drop-in replacement.
 | 6. Fantasy | Monsters, magic, religion, cellular hazards, catastrophes, Rhai events | Distinctly high fantasy |
 | 7. Play | Save/load (seed + command log), more god powers, ruler mode, scenarios | Optional game layers work |
 | 8. Worldbuilding tools | Import heightmaps and painted maps, lore export (Markdown/JSON) | Usable as a setting-design tool |
-| 9. Cylindrical worlds | `WrapX` topology: wrapping camera, borders and pathfinding across the seam | A world can be generated and simulated with east-west wrap |
 
 **MVP = phases 0–4.**
 
@@ -250,7 +257,7 @@ tileset is a drop-in replacement.
 | Question | Decision |
 |---|---|
 | Tick length | One month |
-| World shape | Bounded rectangle now; optional east-west wrap later (Phase 8), kept possible via the `Topology` abstraction |
+| World shape | Bounded rectangle or optional east-west wrap, chosen per world; every system goes through `Topology` |
 | Content format | RON, RimWorld-style defs with inheritance and patching |
 | Scripting | Rhai, introduced with events (Phase 6) |
 | Regions | No pre-drawn provinces: settlements emerge from population, counties form around settlements, titles form around counties |

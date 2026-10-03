@@ -32,6 +32,15 @@ struct Args {
     /// What lies at the map's edges.
     #[arg(long, value_enum, default_value_t = Edges::Open)]
     edges: Edges,
+    /// How much of the planet the map shows: 1 is a region, 4+ several continents.
+    #[arg(long, default_value_t = 1.0)]
+    world_size: f64,
+    /// Size of landmasses: larger gives fewer, bigger continents.
+    #[arg(long, default_value_t = 1.0)]
+    continent_size: f64,
+    /// Climate bands across the map (default: regional, or globe for a cylinder).
+    #[arg(long, value_enum)]
+    climate: Option<Climate>,
     /// Ticks (months) to simulate. Added to `--years`.
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -50,6 +59,14 @@ struct Args {
     /// Draw hex outlines in `--png`.
     #[arg(long)]
     grid: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Climate {
+    /// Cool north to warm south.
+    Regional,
+    /// Pole to pole with the equator across the middle.
+    Globe,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -95,7 +112,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Edges::Open => worldgen::EdgeStyle::Open,
             Edges::Ocean => worldgen::EdgeStyle::Ocean,
         },
-        ..Default::default()
+        world_size: args.world_size,
+        continent_scale: args.continent_size,
+        latitudes: match (args.climate, args.shape) {
+            (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,
+            (Some(Climate::Regional), _) | (None, Shape::Flat) => worldgen::Latitudes::default(),
+        },
     };
     let started = Instant::now();
     let world = worldgen::generate(&params, &registry)?;

@@ -13,7 +13,7 @@ use crate::map_view::MapView;
 use crate::tools::{self, PointerOverUi};
 
 const MIN_SCALE: f32 = 0.125;
-const MAX_SCALE: f32 = 8.0;
+const MAX_SCALE: f32 = 32.0;
 /// Fraction of the remaining zoom covered per second is `1 - e^-ZOOM_RATE`.
 const ZOOM_RATE: f32 = 18.0;
 
@@ -124,9 +124,16 @@ pub fn controls(
             MouseScrollUnit::Pixel => scroll.delta.y / 60.0,
         };
         if notches != 0.0 {
-            cam.target_scale = (cam.target_scale * 0.85f32.powf(notches)).clamp(MIN_SCALE, MAX_SCALE);
+            cam.target_scale *= 0.85f32.powf(notches);
         }
     }
+    // A wrapping map is drawn three times; don't zoom out so far that the
+    // view could show past the copies.
+    let max_scale = match (view.wrap, windows.single()) {
+        (true, Ok(window)) => (2.0 * view.size.x / window.width().max(1.0)).min(MAX_SCALE),
+        _ => MAX_SCALE,
+    };
+    cam.target_scale = cam.target_scale.clamp(MIN_SCALE, max_scale.max(MIN_SCALE));
     let old = ortho.scale;
     if (old - cam.target_scale).abs() > f32::EPSILON {
         let t = 1.0 - (-ZOOM_RATE * time.delta_secs()).exp();
@@ -146,8 +153,21 @@ pub fn controls(
         ortho.scale = new;
     }
 
-    // Don't let the map be lost off-screen.
+    // Don't let the map be lost off-screen. A wrapping map instead keeps the
+    // camera over the middle copy, moving any grab point with it so a drag
+    // carries on seamlessly.
     let half = view.size / 2.0;
-    transform.translation.x = transform.translation.x.clamp(-half.x, half.x);
+    if view.wrap {
+        let x = transform.translation.x;
+        let wrapped = (x + half.x).rem_euclid(view.size.x) - half.x;
+        if wrapped != x {
+            transform.translation.x = wrapped;
+            if let Some(grab) = cam.grab.as_mut() {
+                grab.x += wrapped - x;
+            }
+        }
+    } else {
+        transform.translation.x = transform.translation.x.clamp(-half.x, half.x);
+    }
     transform.translation.y = transform.translation.y.clamp(-half.y, half.y);
 }

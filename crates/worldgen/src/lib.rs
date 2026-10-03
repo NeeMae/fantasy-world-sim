@@ -34,6 +34,11 @@ pub struct WorldGenParams {
     pub height: u32,
     pub wrap: Wrap,
     pub edges: EdgeStyle,
+    /// How much of the planet the map shows. 1 is a region (a sea and the
+    /// lands around it); larger values zoom out to several continents.
+    /// Independent of `width`/`height`, which only set how finely it's
+    /// divided into hexes.
+    pub world_size: f64,
     /// Size of landmasses: larger values give fewer, bigger continents.
     pub continent_scale: f64,
     /// Which climate bands the map covers.
@@ -63,6 +68,7 @@ impl Default for WorldGenParams {
             height: 320,
             wrap: Wrap::None,
             edges: EdgeStyle::Open,
+            world_size: 1.0,
             continent_scale: 1.0,
             latitudes: Latitudes::default(),
         }
@@ -77,6 +83,8 @@ pub enum WorldGenError {
     OddWrapWidth(u32),
     #[error("world dimensions must be non-zero")]
     Empty,
+    #[error("world size must be positive (got {0})")]
+    BadWorldSize(f64),
 }
 
 /// Independent noise layers, each seeded from the world seed.
@@ -95,14 +103,22 @@ struct Layers {
 }
 
 impl Layers {
-    fn new(seed: u64, continent_scale: f64) -> Self {
+    fn new(seed: u64, continent_scale: f64, world_size: f64, rows: u32) -> Self {
         let layer_seed = |layer| rng::mix(seed, 0, layer, rng::purpose::WORLDGEN) as u32;
+        // Skip detail octaves finer than about three hexes: they can't be
+        // drawn and only add speckle. Each octave doubles the frequency.
+        const DETAIL_FREQUENCY: f64 = 3.2;
+        let cycles = DETAIL_FREQUENCY * world_size; // base cycles per map height
+        let detail_octaves = ((rows as f64 / (3.0 * cycles)).log2().floor() as i64 + 1).clamp(1, 5) as usize;
         Layers {
             continents: Fbm::<Perlin>::new(layer_seed(0))
                 .set_octaves(3)
                 .set_frequency(1.1 / continent_scale)
                 .set_persistence(0.45),
-            detail: Fbm::<Perlin>::new(layer_seed(3)).set_octaves(5).set_frequency(3.2).set_persistence(0.5),
+            detail: Fbm::<Perlin>::new(layer_seed(3))
+                .set_octaves(detail_octaves)
+                .set_frequency(DETAIL_FREQUENCY)
+                .set_persistence(0.5),
             warp: Fbm::<Perlin>::new(layer_seed(4)).set_octaves(3).set_frequency(1.4 / continent_scale),
             moisture: Fbm::<Perlin>::new(layer_seed(1)).set_octaves(4).set_frequency(2.2),
             climate: Fbm::<Perlin>::new(layer_seed(2)).set_octaves(3).set_frequency(3.0),
@@ -126,11 +142,14 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     if params.width == 0 || params.height == 0 {
         return Err(WorldGenError::Empty);
     }
+    if !(params.world_size > 0.0 && params.world_size.is_finite()) {
+        return Err(WorldGenError::BadWorldSize(params.world_size));
+    }
     if params.wrap == Wrap::X && !params.width.is_multiple_of(2) {
         return Err(WorldGenError::OddWrapWidth(params.width));
     }
     let topology = Topology::new(params.width, params.height, params.wrap);
-    let layers = Layers::new(params.seed, params.continent_scale);
+    let layers = Layers::new(params.seed, params.continent_scale, params.world_size, params.height);
 
     let samples: Vec<(f32, f32, f32)> = (0..topology.len() as u32)
         .into_par_iter()
@@ -176,15 +195,19 @@ fn sample(
     let (u, v) = (x / h, y / h); // v in 0..1, u scaled to keep hexes isotropic
     let span = w * 0.75 / (3f64.sqrt() / 2.0) / h;
 
+    // Noise-space position, centred on the middle of the map so that a
+    // wider canvas or a bigger world reveals more around the same centre.
+    // `world_size` is how many "region heights" of terrain the map spans.
+    let ws = params.world_size;
     let point = |offset: f64| -> [f64; 3] {
         match topology.wrap() {
             // Sample a cylinder so the noise is seamless across the east-west seam.
             Wrap::X => {
                 let angle = u / span * std::f64::consts::TAU;
-                let radius = span / std::f64::consts::TAU;
-                [angle.cos() * radius + offset, angle.sin() * radius, v]
+                let radius = span * ws / std::f64::consts::TAU;
+                [angle.cos() * radius + offset, angle.sin() * radius, (v - 0.5) * ws]
             }
-            Wrap::None => [u + offset, v, 0.0],
+            Wrap::None => [(u - span / 2.0) * ws + offset, (v - 0.5) * ws, 0.0],
         }
     };
 
@@ -301,6 +324,54 @@ mod tests {
             border.flatten().any(|h| w.terrain.biome[h.index()] != sea)
         });
         assert!(touches);
+    }
+
+    #[test]
+    fn same_world_at_any_scale() {
+        // Doubling the hex count should redraw the same geography finer.
+        let reg = registry();
+        let coarse =
+            generate(&WorldGenParams { width: 64, height: 40, ..params(9, Wrap::None) }, &reg).unwrap();
+        let fine =
+            generate(&WorldGenParams { width: 128, height: 80, ..params(9, Wrap::None) }, &reg).unwrap();
+        let sea = reg.biome_id("sea").unwrap();
+        let mut agree = 0;
+        for id in coarse.topology.ids() {
+            let (c, r) = coarse.topology.offset(id);
+            let f = fine.topology.at(c * 2, r * 2).unwrap();
+            agree += ((coarse.terrain.biome[id.index()] == sea) == (fine.terrain.biome[f.index()] == sea))
+                as usize;
+        }
+        let share = agree as f64 / coarse.topology.len() as f64;
+        assert!(share > 0.9, "land and sea mostly agree across scales ({share:.2})");
+    }
+
+    #[test]
+    fn wrapping_world_is_seamless() {
+        // Elevation should change no more across the east-west seam than
+        // between any other pair of neighbouring columns.
+        let reg = registry();
+        let w = generate(&WorldGenParams { world_size: 3.0, ..params(5, Wrap::X) }, &reg).unwrap();
+        let t = &w.topology;
+        let col_step = |a: i32, b: i32| -> f32 {
+            (0..t.height() as i32)
+                .map(|r| {
+                    (w.terrain.elevation[t.at(a, r).unwrap().index()]
+                        - w.terrain.elevation[t.at(b, r).unwrap().index()])
+                    .abs()
+                })
+                .sum::<f32>()
+        };
+        let seam = col_step(63, 0);
+        let typical = (1..63).map(|c| col_step(c - 1, c)).sum::<f32>() / 62.0;
+        assert!(seam < typical * 2.5, "seam step {seam} vs typical {typical}");
+    }
+
+    #[test]
+    fn rejects_bad_world_size() {
+        let reg = registry();
+        let bad = WorldGenParams { world_size: 0.0, ..params(1, Wrap::None) };
+        assert!(matches!(generate(&bad, &reg), Err(WorldGenError::BadWorldSize(_))));
     }
 
     #[test]
