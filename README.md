@@ -32,6 +32,7 @@ App controls:
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
+| M | Cycle map views: Terrain, Elevation, Plates |
 | Space, 1–5 | Pause/resume, speed |
 
 The World panel generates a new world from:
@@ -47,7 +48,13 @@ The World panel generates a new world from:
 | Climate | *Regional* (cool north, warm south) or *Globe* (pole to pole) |
 
 `sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
-`--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`).
+`--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`),
+and `--view terrain|elevation|plates` for `--png`.
+
+Mountains come from plate tectonics: colliding plates raise ranges (with
+trenches offshore and island arcs at sea), separating plates open rifts, and
+microplates add hill country. The Plates view shows the plates, with
+boundaries tinted red where they collide and blue where they pull apart.
 
 ## Layout
 
@@ -88,3 +95,12 @@ Defs work like RimWorld's:
 Biome climate ranges are percentiles for elevation and moisture (so
 `elevation: (0.0, 0.55)` means "the lowest 55% of the world") and a 0–1
 polar-to-equatorial scale for temperature. See `packs/base/defs/biomes.ron`.
+
+Relief (flat, hills, mountains, …) is separate from biome, so a hex can be
+forested hills or desert mountains. Relief defs pick a range of the
+tectonically driven `ruggedness` value and a map symbol; see
+`packs/base/defs/reliefs.ron`:
+
+```ron
+(reliefs: [(id: "badlands", name: "Badlands", ruggedness: (0.35, 0.5), priority: 1, glyph: "hills")])
+```

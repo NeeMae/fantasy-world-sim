@@ -1,17 +1,21 @@
-use content::BiomeId;
+use content::{BiomeId, ReliefId};
 use serde::{Deserialize, Serialize};
 
 use crate::{Date, HexId, Topology};
 
 /// Per-hex physical geography, stored as parallel arrays indexed by [`HexId`].
 ///
-/// Elevation, moisture and temperature are normalised to `0.0..=1.0`.
+/// Elevation, moisture, temperature and ruggedness are in `0.0..=1.0`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Terrain {
     pub elevation: Vec<f32>,
     pub moisture: Vec<f32>,
     pub temperature: Vec<f32>,
+    /// How broken the land is, mostly from tectonic uplift; decides relief.
+    pub ruggedness: Vec<f32>,
     pub biome: Vec<BiomeId>,
+    /// Flat, hills, mountains, ...: layered on top of the biome.
+    pub relief: Vec<ReliefId>,
 }
 
 impl Terrain {
@@ -20,7 +24,9 @@ impl Terrain {
             elevation: vec![0.0; len],
             moisture: vec![0.0; len],
             temperature: vec![0.0; len],
+            ruggedness: vec![0.0; len],
             biome: vec![BiomeId::default(); len],
+            relief: vec![ReliefId::default(); len],
         }
     }
 
@@ -33,6 +39,26 @@ impl Terrain {
     }
 }
 
+/// A tectonic plate.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Plate {
+    /// Whether most of the plate (on this map) is land.
+    pub continental: bool,
+}
+
+/// The world's tectonic plates, as generated. Kept for display now, and for
+/// volcanoes and earthquakes later.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Geology {
+    pub plates: Vec<Plate>,
+    /// Index into `plates` for every hex.
+    pub plate: Vec<u16>,
+    /// Signed stress at plate boundaries: positive where plates collide
+    /// (mountains, trenches, island arcs), negative where they pull apart
+    /// (rifts, ridges), zero in plate interiors.
+    pub stress: Vec<f32>,
+}
+
 /// The complete simulation state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct World {
@@ -40,6 +66,7 @@ pub struct World {
     pub tick: u64,
     pub topology: Topology,
     pub terrain: Terrain,
+    pub geology: Geology,
     /// Incremented whenever terrain changes, so views know when to redraw
     /// the map instead of diffing it.
     pub terrain_revision: u64,
@@ -48,7 +75,12 @@ pub struct World {
 impl World {
     pub fn new(seed: u64, topology: Topology, terrain: Terrain) -> Self {
         assert_eq!(topology.len(), terrain.len(), "terrain size must match the topology");
-        World { seed, tick: 0, topology, terrain, terrain_revision: 0 }
+        let geology = Geology {
+            plates: vec![Plate { continental: true }],
+            plate: vec![0; terrain.len()],
+            stress: vec![0.0; terrain.len()],
+        };
+        World { seed, tick: 0, topology, terrain, geology, terrain_revision: 0 }
     }
 
     pub fn date(&self) -> Date {
@@ -66,11 +98,15 @@ impl World {
         h.u64(self.tick);
         h.u64(self.terrain_revision);
         let t = &self.terrain;
-        for v in t.elevation.iter().chain(&t.moisture).chain(&t.temperature) {
+        for v in t.elevation.iter().chain(&t.moisture).chain(&t.temperature).chain(&t.ruggedness) {
             h.u64(v.to_bits() as u64);
         }
-        for b in &t.biome {
-            h.u64(b.0 as u64);
+        for (b, r) in t.biome.iter().zip(&t.relief) {
+            h.u64(b.0 as u64 | (r.0 as u64) << 16);
+        }
+        let g = &self.geology;
+        for (p, s) in g.plate.iter().zip(&g.stress) {
+            h.u64(*p as u64 | (s.to_bits() as u64) << 16);
         }
         h.0
     }

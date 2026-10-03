@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use map_raster::{HexLayout, RenderOptions};
+use map_raster::{HexLayout, MapMode, RenderOptions};
 use sim_core::{Simulation, Wrap};
 use worldgen::WorldGenParams;
 
@@ -59,6 +59,19 @@ struct Args {
     /// Draw hex outlines in `--png`.
     #[arg(long)]
     grid: bool,
+    /// What `--png` shows.
+    #[arg(long, value_enum, default_value_t = View::Terrain)]
+    view: View,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum View {
+    /// Biomes and relief.
+    Terrain,
+    /// Height.
+    Elevation,
+    /// Tectonic plates and their boundaries.
+    Plates,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -144,8 +157,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("state hash: {:016x}", sim.world().state_hash());
 
     if let Some(path) = args.png {
+        let mode = match args.view {
+            View::Terrain => MapMode::Terrain,
+            View::Elevation => MapMode::Elevation,
+            View::Plates => MapMode::Plates,
+        };
         let opts = RenderOptions {
             layout: HexLayout { size: args.hex_size },
+            mode,
             grid: args.grid,
             ..Default::default()
         };
@@ -167,4 +186,17 @@ fn print_biomes(world: &sim_core::World, registry: &content::Registry) {
     for (biome, n) in rows {
         println!("  {:<12} {:>6.2}%", biome.name, n as f64 / total * 100.0);
     }
+    let land = world.terrain.biome.iter().filter(|b| !registry.biome(**b).water).count().max(1);
+    for (i, relief) in registry.reliefs().iter().enumerate() {
+        let n = world
+            .terrain
+            .relief
+            .iter()
+            .zip(&world.terrain.biome)
+            .filter(|(r, b)| r.0 as usize == i && !registry.biome(**b).water)
+            .count();
+        println!("  relief {:<10} {:>6.2}% of land", relief.name, n as f64 / land as f64 * 100.0);
+    }
+    let continental = world.geology.plates.iter().filter(|p| p.continental).count();
+    println!("  plates: {} ({continental} continental)", world.geology.plates.len());
 }

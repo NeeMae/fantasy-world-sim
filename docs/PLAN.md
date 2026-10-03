@@ -90,8 +90,21 @@ trivially serialisable.
   land and sea run off every side. *Ocean* gives a self-contained world:
   a gentle slope makes land likelier towards the middle without dictating
   the coast, plus a thin guaranteed band of sea at the border.
-- **Shapes:** low-frequency continents plus detail, domain-warped so
-  coastlines swirl instead of forming round blobs.
+- **Continents:** a continental-crust field (domain-warped noise) decides
+  where land is, independently of plate outlines: as on Earth, most
+  coasts are not plate boundaries.
+- **Plate tectonics:** two layers of plates (major plates and microplates)
+  as a continuous Voronoi field over noise space, so they exist past open
+  edges and wrap seamlessly. Each plate drifts; at each boundary the
+  relative motion and the crust on either side decide the landform:
+  continental collisions raise great ranges, ocean-under-continent gives a
+  coastal range and trench, ocean-ocean gives island arcs, separation gives
+  rifts and mid-ocean ridges. Pair effects are blended with soft plate
+  memberships so the land is continuous everywhere, including triple
+  junctions (tested).
+- **Relief vs biome:** relief (flat/hills/mountains, content-defined) is a
+  separate layer from biome, driven by tectonic ruggedness plus high
+  ground. Placeholder art draws one symbol per seven-hex "flower".
 - **World size vs scale:** *world size* is how much of the planet the map
   shows (region → planet); *scale* is how many hexes it's drawn with. The
   same seed gives the same geography at any scale, and noise detail finer
@@ -106,7 +119,8 @@ trivially serialisable.
 
 | Layer | Contents |
 |---|---|
-| Terrain | Elevation, moisture, temperature → biome; rivers; resources; fertility and travel cost from biome defs |
+| Terrain | Elevation, moisture, temperature → biome; tectonic ruggedness → relief; rivers; resources; fertility and travel cost from biome and relief defs |
+| Geology | Tectonic plates and boundary stress, kept for volcanoes and earthquakes |
 | Peoples | Races, cultures (with languages) and religions; biome preferences, traits, growth, lifespans, temperament |
 | Population | Per-settlement demographic mix: groups of `(race, culture, religion, size)` that grow, migrate, assimilate and convert |
 | Settlements | Founded *dynamically* where people gather; population, food, wealth, defence; hamlet → village → town → city |
@@ -234,6 +248,7 @@ tileset is a drop-in replacement.
 | 0. Skeleton ✅ | Cargo workspace, headless tick loop, seeded RNG, Bevy viewer, CI | `sim-cli` runs N ticks; app shows a pannable/zoomable hex map |
 | 0.5 Editor basics ✅ | Hex outlines, terrain brush with undo/redo, instant god powers, regenerate | Worlds can be rerolled and reshaped comfortably |
 | 0.6 World shape ✅ | Open/ocean edges, world size vs scale, custom canvas, east-west wrap | Region maps through wrapped planets from one generator |
+| 0.7 Tectonics ✅ | Plates, boundary landforms, relief layer, map views (terrain/elevation/plates), relief brush | Mountain ranges follow plate collisions |
 | 1. Living land | Rivers and lakes; biome fertility and travel cost; race, culture and language defs; name generator; world settings (volatility) | Rivers carve the map; cultures generate distinct names |
 | 2. Peoples & settlements | Population groups, growth, migration; settlements founded dynamically; counties as settlement hinterlands; border and settlement rendering | Peoples spread from origins and settle the land into counties |
 | 3. Titles & realms | County → Duchy → Kingdom → Empire; titles formed around counties; realms, vassals, expansion | Kingdoms form and fill the map |

@@ -11,7 +11,7 @@ use map_raster::{PixelRect, RenderOptions};
 use sim_core::{HexId, World};
 
 use crate::sim_thread::SimThread;
-use crate::tools::{Hover, Selection, ToolState};
+use crate::tools::{Hover, MapModeSetting, Selection, ToolState};
 
 /// Chunk edge in pixels. Small enough that redrawing one is cheap and that
 /// huge maps stay under GPU texture size limits.
@@ -76,8 +76,9 @@ pub fn spawn(
     images: &mut Assets<Image>,
     registry: Arc<Registry>,
     world: &World,
+    mode: map_raster::MapMode,
 ) -> Vec2 {
-    let options = RenderOptions::default();
+    let options = RenderOptions { mode, ..default() };
     let (w, h) = options.layout.image_size(&world.topology);
     let size = Vec2::new(w as f32, h as f32);
     let wrap = world.topology.wrap() == sim_core::Wrap::X;
@@ -124,6 +125,23 @@ fn make_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     )
+}
+
+/// Switches the map view, redrawing every chunk.
+pub fn apply_map_mode(
+    wanted: Res<MapModeSetting>,
+    sim: Res<SimThread>,
+    mut view: ResMut<MapView>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if view.options.mode == wanted.0 {
+        return;
+    }
+    view.options.mode = wanted.0;
+    let world = sim.snapshot().world;
+    for chunk in &view.chunks {
+        view.redraw_chunk(chunk, &world, &mut images);
+    }
 }
 
 /// Redraws the chunks covering hexes the simulation changed.

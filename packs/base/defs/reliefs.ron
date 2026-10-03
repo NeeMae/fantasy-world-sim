@@ -1,0 +1,15 @@
+// Relief is the lie of the land, layered on top of the biome.
+//
+// World generation gives every land hex a `ruggedness` from 0 (flat) to 1
+// (sheer), driven mostly by plate tectonics: colliding plates raise ranges,
+// and old boundaries leave hill country. The matching relief with the
+// highest `priority` wins. Seas are always flat.
+//
+// `glyph` picks the placeholder map symbol: "none", "hills" or "mountains".
+(
+    reliefs: [
+        (id: "flat", name: "Flat", ruggedness: (0.0, 0.22)),
+        (id: "hills", name: "Hills", ruggedness: (0.22, 0.48), glyph: "hills"),
+        (id: "mountains", name: "Mountains", ruggedness: (0.48, 1.0), glyph: "mountains"),
+    ],
+)

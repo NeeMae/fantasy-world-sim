@@ -59,14 +59,33 @@ impl HexLayout {
 #[derive(Clone, Copy, Debug)]
 pub struct RenderOptions {
     pub layout: HexLayout,
+    pub mode: MapMode,
     /// Draw faint outlines between hexes.
     pub grid: bool,
     pub background: Rgb,
 }
 
+/// What the map shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MapMode {
+    /// Biomes with relief symbols: the normal map.
+    #[default]
+    Terrain,
+    /// Height as a colour ramp, from deep sea to snowline.
+    Elevation,
+    /// Tectonic plates, with boundaries tinted red where plates collide and
+    /// blue where they pull apart.
+    Plates,
+}
+
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { layout: HexLayout::default(), grid: false, background: Rgb(12, 14, 22) }
+        RenderOptions {
+            layout: HexLayout::default(),
+            mode: MapMode::Terrain,
+            grid: false,
+            background: Rgb(12, 14, 22),
+        }
     }
 }
 
@@ -139,27 +158,53 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
             }
             let x = (rect.x as isize + rx as isize).rem_euclid(map_w as isize) as usize;
             let y = (rect.y as isize + ry as isize).max(0) as usize;
-            let biome = registry.biome(world.terrain.biome[id as usize]);
-            let elevation = world.terrain.elevation[id as usize];
+            let i = id as usize;
+            let biome = registry.biome(world.terrain.biome[i]);
+            let elevation = world.terrain.elevation[i];
+            let neighbours =
+                [(lx + 1, ly), (lx - 1, ly), (lx, ly + 1), (lx, ly - 1)].map(|(nx, ny)| owner[ny * ow + nx]);
+            let coast = neighbours.iter().any(|&n| n != NONE && is_water(n) != biome.water);
 
             // Ordered dither gives flat colours a hand-placed pixel texture.
             let mut shade = 1.0 + (BAYER[y % 4][x % 4] - 0.5) * 0.10;
-            if biome.water {
-                shade *= 0.80 + elevation * 0.4; // deeper water is darker
-            } else {
-                shade *= 0.88 + elevation * 0.24;
-            }
-
-            let neighbours =
-                [(lx + 1, ly), (lx - 1, ly), (lx, ly + 1), (lx, ly - 1)].map(|(nx, ny)| owner[ny * ow + nx]);
-            if neighbours.iter().any(|&n| n != NONE && is_water(n) != biome.water) {
+            let base = match opts.mode {
+                MapMode::Terrain => {
+                    shade *= if biome.water { 0.80 + elevation * 0.4 } else { 0.88 + elevation * 0.24 };
+                    // Rugged ground darkens slightly, so ranges still read
+                    // when zoomed out too far for relief symbols.
+                    shade *= 1.0 - world.terrain.ruggedness[i] * 0.3;
+                    biome.color
+                }
+                MapMode::Elevation => elevation_color(elevation, biome.water),
+                MapMode::Plates => {
+                    let g = &world.geology;
+                    let plate = g.plate[i];
+                    let edge = neighbours.iter().any(|&n| n != NONE && g.plate[n as usize] != plate);
+                    if edge {
+                        shade *= 0.55;
+                    }
+                    plate_color(plate, g.plates[plate as usize].continental, g.stress[i], biome.water)
+                }
+            };
+            if coast {
                 // Coastline: dark edge on land, pale surf on water.
                 shade = if biome.water { 1.35 } else { 0.62 };
             } else if opts.grid && neighbours.iter().any(|&n| n != NONE && n != id) {
                 shade *= 0.85;
             }
+            let mut c = base.scale(shade);
 
-            let c = biome.color.scale(shade);
+            let symbols =
+                opts.mode == MapMode::Terrain && !coast && !biome.water && opts.layout.size >= MIN_GLYPH_SIZE;
+            if symbols
+                && let Some(ink) = relief_ink(world, registry, &opts.layout, HexId(id), x, y, map_w, wraps)
+            {
+                c = match ink {
+                    Ink::Light => c.scale(1.25),
+                    Ink::Shade => c.scale(0.8),
+                    Ink::Dark => c.scale(0.45),
+                };
+            }
             px.copy_from_slice(&[c.0, c.1, c.2, 255]);
         }
     });
@@ -242,6 +287,165 @@ pub fn outline(
         }
     }
     Some(Outline { rect, rgba })
+}
+
+/// Height ramp: navy deeps to pale shallows, then green lowlands through
+/// tan and brown uplands to white peaks.
+fn elevation_color(e: f32, water: bool) -> Rgb {
+    let stops: &[(f32, Rgb)] = if water {
+        &[(0.0, Rgb(16, 28, 66)), (0.55, Rgb(70, 130, 190))]
+    } else {
+        &[
+            (0.55, Rgb(70, 140, 70)),
+            (0.72, Rgb(170, 175, 95)),
+            (0.86, Rgb(150, 110, 70)),
+            (0.96, Rgb(120, 100, 90)),
+            (1.0, Rgb(245, 245, 250)),
+        ]
+    };
+    ramp(stops, e)
+}
+
+fn ramp(stops: &[(f32, Rgb)], v: f32) -> Rgb {
+    let lerp = |a: u8, b: u8, t: f32| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    for pair in stops.windows(2) {
+        let ((v0, c0), (v1, c1)) = (pair[0], pair[1]);
+        if v <= v1 {
+            let t = ((v - v0) / (v1 - v0).max(1e-6)).clamp(0.0, 1.0);
+            return Rgb(lerp(c0.0, c1.0, t), lerp(c0.1, c1.1, t), lerp(c0.2, c1.2, t));
+        }
+    }
+    stops.last().map_or(Rgb(0, 0, 0), |s| s.1)
+}
+
+/// A distinct colour per plate: bright for continental crust, muted for
+/// oceanic, tinted red (colliding) or blue (pulling apart) near boundaries.
+fn plate_color(plate: u16, continental: bool, stress: f32, water: bool) -> Rgb {
+    // Golden-angle hue spacing keeps neighbouring ids distinct.
+    let hue = (plate as f32 * 137.508) % 360.0;
+    let (sat, val) = if continental { (0.45, 0.85) } else { (0.35, 0.55) };
+    let mut c = hsv(hue, sat, if water { val * 0.8 } else { val });
+    let s = stress.clamp(-1.0, 1.0);
+    let tint = if s > 0.0 { Rgb(230, 60, 40) } else { Rgb(60, 120, 240) };
+    let t = (s.abs() * 1.4).min(0.85);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    c = Rgb(mix(c.0, tint.0), mix(c.1, tint.1), mix(c.2, tint.2));
+    c
+}
+
+fn hsv(h: f32, s: f32, v: f32) -> Rgb {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb(to(r), to(g), to(b))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ink {
+    /// Sunlit face.
+    Light,
+    /// Shadowed face.
+    Shade,
+    /// Outline.
+    Dark,
+}
+
+/// Pixel-art relief symbols: `D` outline, `L` sunlit face, `S` shadowed face.
+///
+/// One symbol is drawn per seven-hex "flower" (see [`flower_centre`]), at
+/// the flower's centre with a small hashed offset: spaced out like a
+/// hand-drawn map, a cluster of mountain hexes reads as a range of peaks
+/// rather than a texture.
+const MOUNTAIN: [&str; 8] = [
+    ".......D.......",
+    "......DLD......",
+    ".....DLLSD.....",
+    "....DLLLSSD....",
+    "...DLLLLSSSD...",
+    "..DLLLLLSSSSD..",
+    ".DLLLLLLSSSSSD.",
+    "DLLLLLLLSSSSSSD",
+];
+const HILLS: [&str; 4] = ["...DDD........", ".DDLLSDD..DDD.", "DLLLLSSSDDLLSD", "..............."];
+
+/// Hexes smaller than this (in pixels) are too small for symbols.
+const MIN_GLYPH_SIZE: f32 = 3.5;
+
+/// The centre of the seven-hex flower containing `hex`.
+///
+/// Hexes with `(q + 3r) mod 7 == 0` form a perfect code on the hex grid:
+/// every hex is either one of them or adjacent to exactly one. So each hex
+/// belongs to exactly one flower, found with a single step.
+fn flower_centre(topo: &Topology, hex: HexId) -> Option<HexId> {
+    let a = topo.axial(hex);
+    let f = (a.q + 3 * a.r).rem_euclid(7);
+    if f == 0 {
+        return Some(hex);
+    }
+    let step = sim_core::Axial::DIRECTIONS.into_iter().find(|d| (f + d.q + 3 * d.r).rem_euclid(7) == 0)?;
+    topo.at_axial(a + step)
+}
+
+/// The relief-symbol ink (if any) at map pixel `(x, y)`, which lies in hex
+/// `own`.
+#[allow(clippy::too_many_arguments)]
+fn relief_ink(
+    world: &World,
+    registry: &Registry,
+    layout: &HexLayout,
+    own: HexId,
+    x: usize,
+    y: usize,
+    map_w: u32,
+    wraps: bool,
+) -> Option<Ink> {
+    let topo = &world.topology;
+    let centre = flower_centre(topo, own)?;
+    if registry.biome(world.terrain.biome[centre.index()]).water {
+        return None;
+    }
+    let glyph = registry.relief(world.terrain.relief[centre.index()]).glyph;
+    let (cx, cy) = layout.center(topo, centre);
+    // Nudge each symbol a little so ranges don't look stamped on a grid.
+    let h = sim_core::rng::mix(centre.0 as u64, 0, 0, 0);
+    let scale = (layout.size / 4.0).floor().max(1.0);
+    let jx = ((h & 3) as f32 - 1.5) * scale;
+    let jy = (((h >> 2) & 3) as f32 - 1.5) * scale * 0.5;
+    let mut dx = x as f32 + 0.5 - cx - jx;
+    if wraps {
+        dx -= (dx / map_w as f32).round() * map_w as f32;
+    }
+    glyph_pixel(glyph, layout.size, dx, y as f32 + 0.5 - cy - jy)
+}
+
+/// Which ink, if any, a relief glyph puts at offset `(dx, dy)` from its
+/// centre, for hexes of size `size`. Symbols scale up with bigger hexes.
+fn glyph_pixel(glyph: content::Glyph, size: f32, dx: f32, dy: f32) -> Option<Ink> {
+    let rows: &[&str] = match glyph {
+        content::Glyph::None => return None,
+        content::Glyph::Mountains => &MOUNTAIN,
+        content::Glyph::Hills => &HILLS,
+    };
+    let scale = (size / 4.0).floor().max(1.0);
+    let (w, h) = (rows[0].len() as i32, rows.len() as i32);
+    let col = (dx / scale).floor() as i32 + w / 2;
+    let row = (dy / scale).floor() as i32 + h / 2;
+    let line = rows.get(usize::try_from(row).ok()?)?;
+    match line.as_bytes().get(usize::try_from(col).ok()?)? {
+        b'L' => Some(Ink::Light),
+        b'S' => Some(Ink::Shade),
+        b'D' => Some(Ink::Dark),
+        _ => None,
+    }
 }
 
 /// 4×4 Bayer matrix, normalised to `0.0..1.0`.
@@ -345,6 +549,24 @@ mod tests {
         let o = outline(&topo, &layout, &brush, 1, [255; 4]).unwrap();
         assert_eq!(o.rect, r);
         assert!(o.rgba.chunks(4).filter(|p| p[3] != 0).count() > 30);
+    }
+
+    #[test]
+    fn every_hex_belongs_to_exactly_one_flower() {
+        let topo = Topology::new(30, 20, Wrap::None);
+        for hex in topo.ids() {
+            let (col, row) = topo.offset(hex);
+            // Skip the border, where a flower's centre can be off the map.
+            if col == 0 || row == 0 || col == 29 || row == 19 {
+                continue;
+            }
+            let centre = flower_centre(&topo, hex).expect("interior hexes have a centre");
+            assert!(centre == hex || topo.neighbors(hex).any(|n| n == centre));
+            let centres = std::iter::once(hex)
+                .chain(topo.neighbors(hex))
+                .filter(|&h| flower_centre(&topo, h) == Some(h));
+            assert_eq!(centres.count(), 1, "exactly one centre within reach");
+        }
     }
 
     #[test]

@@ -2,9 +2,16 @@ use std::sync::Arc;
 
 use content::Registry;
 
-use content::BiomeId;
+use content::{BiomeId, ReliefId};
 
-use crate::{Chronicle, Command, EditId, EventKind, HexId, World};
+use crate::{Chronicle, Command, EditId, EventKind, HexId, Paint, World};
+
+/// The paintable surface of one hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Surface {
+    biome: BiomeId,
+    relief: ReliefId,
+}
 
 /// The largest brush a single command may use, to bound the work one
 /// (possibly untrusted) command can cause.
@@ -18,7 +25,7 @@ pub const UNDO_DEPTH: usize = 100;
 #[derive(Clone, Debug)]
 struct Edit {
     id: EditId,
-    changes: Vec<(HexId, BiomeId, BiomeId)>,
+    changes: Vec<(HexId, Surface, Surface)>,
 }
 
 /// Owns the world and advances it one tick (one month) at a time.
@@ -75,19 +82,24 @@ impl Simulation {
         let tick = self.world.tick;
         for command in std::mem::take(&mut self.pending) {
             match command {
-                Command::Reshape { center, radius, biome, edit } => {
+                Command::Reshape { center, radius, paint, edit } => {
                     // Commands come from outside; ignore ones that don't make sense.
-                    if !self.world.contains(center)
-                        || biome.0 as usize >= self.registry.biomes().len()
-                        || radius > MAX_RESHAPE_RADIUS
-                    {
+                    let valid_paint = match paint {
+                        Paint::Biome(b) => (b.0 as usize) < self.registry.biomes().len(),
+                        Paint::Relief(r) => (r.0 as usize) < self.registry.reliefs().len(),
+                    };
+                    if !self.world.contains(center) || !valid_paint || radius > MAX_RESHAPE_RADIUS {
                         continue;
                     }
                     let mut changes = Vec::new();
                     for hex in self.world.topology.within(center, radius) {
-                        let before = self.world.terrain.biome[hex.index()];
-                        if before != biome {
-                            changes.push((hex, before, biome));
+                        let before = self.surface(hex);
+                        let after = match paint {
+                            Paint::Biome(biome) => Surface { biome, ..before },
+                            Paint::Relief(relief) => Surface { relief, ..before },
+                        };
+                        if before != after {
+                            changes.push((hex, before, after));
                         }
                     }
                     if changes.is_empty() {
@@ -98,22 +110,22 @@ impl Simulation {
                         EventKind::TerrainReshaped {
                             center,
                             radius,
-                            to: biome,
+                            to: paint,
                             hexes_changed: changes.len() as u32,
                         },
                     );
-                    self.set_biomes(changes.iter().map(|&(hex, _, after)| (hex, after)));
+                    self.set_surfaces(changes.iter().map(|&(hex, _, after)| (hex, after)));
                     self.journal(edit, changes);
                 }
                 Command::Undo => {
                     if let Some(edit) = self.undo.pop() {
-                        self.set_biomes(edit.changes.iter().rev().map(|&(hex, before, _)| (hex, before)));
+                        self.set_surfaces(edit.changes.iter().rev().map(|&(hex, before, _)| (hex, before)));
                         self.redo.push(edit);
                     }
                 }
                 Command::Redo => {
                     if let Some(edit) = self.redo.pop() {
-                        self.set_biomes(edit.changes.iter().map(|&(hex, _, after)| (hex, after)));
+                        self.set_surfaces(edit.changes.iter().map(|&(hex, _, after)| (hex, after)));
                         self.undo.push(edit);
                     }
                 }
@@ -126,9 +138,15 @@ impl Simulation {
         (self.undo.len(), self.redo.len())
     }
 
-    fn set_biomes(&mut self, changes: impl Iterator<Item = (HexId, BiomeId)>) {
-        for (hex, biome) in changes {
-            self.world.terrain.biome[hex.index()] = biome;
+    fn surface(&self, hex: HexId) -> Surface {
+        let t = &self.world.terrain;
+        Surface { biome: t.biome[hex.index()], relief: t.relief[hex.index()] }
+    }
+
+    fn set_surfaces(&mut self, changes: impl Iterator<Item = (HexId, Surface)>) {
+        for (hex, s) in changes {
+            self.world.terrain.biome[hex.index()] = s.biome;
+            self.world.terrain.relief[hex.index()] = s.relief;
             self.changed.push(hex);
         }
         self.world.terrain_revision += 1;
@@ -136,7 +154,7 @@ impl Simulation {
 
     /// Records changes under `edit`, merging into the latest edit if it has
     /// the same id. Any new edit makes earlier undone ones unrecoverable.
-    fn journal(&mut self, edit: EditId, changes: Vec<(HexId, BiomeId, BiomeId)>) {
+    fn journal(&mut self, edit: EditId, changes: Vec<(HexId, Surface, Surface)>) {
         self.redo.clear();
         match self.undo.last_mut() {
             Some(last) if last.id == edit => last.changes.extend(changes),
@@ -175,7 +193,6 @@ impl Simulation {
 mod tests {
     use super::*;
     use crate::{Terrain, Topology, Wrap};
-    use content::BiomeId;
 
     fn sim(seed: u64) -> Simulation {
         let registry = content::load_str(r##"(biomes: [(id: "sea", water: true), (id: "land")])"##).unwrap();
@@ -188,7 +205,12 @@ mod tests {
     }
 
     fn stroke(center: u32, radius: u32, biome: u16, edit: u64) -> Command {
-        Command::Reshape { center: HexId(center), radius, biome: BiomeId(biome), edit: EditId(edit) }
+        Command::Reshape {
+            center: HexId(center),
+            radius,
+            paint: Paint::Biome(BiomeId(biome)),
+            edit: EditId(edit),
+        }
     }
 
     #[test]
@@ -226,7 +248,7 @@ mod tests {
     fn brush_reshapes_an_area() {
         let mut s = sim(1);
         let center = s.world().topology.at(4, 3).unwrap();
-        s.submit(Command::Reshape { center, radius: 1, biome: BiomeId(1), edit: EditId(0) });
+        s.submit(Command::Reshape { center, radius: 1, paint: Paint::Biome(BiomeId(1)), edit: EditId(0) });
         s.apply_pending();
         let land = s.world().terrain.biome.iter().filter(|&&b| b == BiomeId(1)).count();
         assert_eq!(land, 7);
@@ -269,6 +291,46 @@ mod tests {
         s.apply_pending();
         assert!(s.world().terrain.biome.iter().all(|&b| b == BiomeId(0)));
         assert_ne!(s.world().state_hash(), original, "revision still advanced");
+    }
+
+    #[test]
+    fn relief_paints_independently_of_biome_and_undoes() {
+        let registry = content::load_str(
+            r#"(biomes: [(id: "sea", water: true), (id: "land")], reliefs: [(id: "flat"), (id: "hills")])"#,
+        )
+        .unwrap();
+        let topo = Topology::new(8, 6, Wrap::None);
+        let mut s = Simulation::new(World::new(1, topo, Terrain::new(topo.len())), Arc::new(registry));
+        s.submit(stroke(10, 0, 1, 1));
+        s.submit(Command::Reshape {
+            center: HexId(10),
+            radius: 0,
+            paint: Paint::Relief(ReliefId(1)),
+            edit: EditId(2),
+        });
+        s.apply_pending();
+        let t = &s.world().terrain;
+        assert_eq!(
+            (t.biome[10], t.relief[10]),
+            (BiomeId(1), ReliefId(1)),
+            "forested hills, not one or the other"
+        );
+        s.submit(Command::Undo);
+        s.apply_pending();
+        let t = &s.world().terrain;
+        assert_eq!(
+            (t.biome[10], t.relief[10]),
+            (BiomeId(1), ReliefId(0)),
+            "undoing the relief keeps the biome"
+        );
+        s.submit(Command::Reshape {
+            center: HexId(10),
+            radius: 0,
+            paint: Paint::Relief(ReliefId(9)),
+            edit: EditId(3),
+        });
+        s.apply_pending();
+        assert_eq!(s.world().terrain.relief[10], ReliefId(0), "unknown relief ignored");
     }
 
     #[test]

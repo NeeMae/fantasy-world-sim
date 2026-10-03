@@ -54,3 +54,72 @@ impl BiomeDef {
             && self.temperature.contains(temperature)
     }
 }
+
+/// How a relief level is drawn on the placeholder map. Written as a
+/// lowercase string (`glyph: "hills"`): def files go through a generic value
+/// tree for inheritance, which only keeps enum variants that are strings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Glyph {
+    #[default]
+    None,
+    Hills,
+    Mountains,
+}
+
+impl TryFrom<String> for Glyph {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, String> {
+        match s.as_str() {
+            "none" => Ok(Glyph::None),
+            "hills" => Ok(Glyph::Hills),
+            "mountains" => Ok(Glyph::Mountains),
+            _ => Err(format!("unknown glyph {s:?}; expected \"none\", \"hills\" or \"mountains\"")),
+        }
+    }
+}
+
+impl From<Glyph> for String {
+    fn from(g: Glyph) -> String {
+        match g {
+            Glyph::None => "none",
+            Glyph::Hills => "hills",
+            Glyph::Mountains => "mountains",
+        }
+        .into()
+    }
+}
+
+/// A level of terrain relief (flat, hills, mountains, ...), layered on top
+/// of the biome so a hex can be, say, forested hills or desert mountains.
+///
+/// World generation computes a *ruggedness* value in `0.0..=1.0` for every
+/// hex, driven mostly by plate tectonics, and assigns the highest-`priority`
+/// relief whose range contains it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReliefDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub ruggedness: Range,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub glyph: Glyph,
+}
+
+impl ReliefDef {
+    /// Used when no pack defines any relief.
+    pub fn flat() -> Self {
+        ReliefDef {
+            id: "flat".into(),
+            name: "Flat".into(),
+            ruggedness: Range::ANY,
+            priority: 0,
+            glyph: Glyph::None,
+        }
+    }
+}

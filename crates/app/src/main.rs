@@ -19,7 +19,7 @@ use bevy::window::WindowResolution;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 
-use tools::{Hover, PointerOverUi, Selection, ToolState};
+use tools::{Hover, MapModeSetting, PointerOverUi, Selection, ToolState};
 use world_setup::{Climate, Content, RegenerateRequest, SCALES, WorldSettings};
 
 #[derive(Parser)]
@@ -87,6 +87,7 @@ fn main() -> AppExit {
         .init_resource::<Hover>()
         .init_resource::<ToolState>()
         .init_resource::<PointerOverUi>()
+        .init_resource::<MapModeSetting>()
         .add_message::<RegenerateRequest>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -96,6 +97,7 @@ fn main() -> AppExit {
                 (camera::controls, ui::hotkeys),
                 tools::update_hover,
                 tools::use_tool,
+                map_view::apply_map_mode,
                 map_view::redraw_changes,
                 map_view::update_outlines,
             )
@@ -113,7 +115,7 @@ fn setup(
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    match world_setup::start_world(&mut commands, &mut images, &content, &settings) {
+    match world_setup::start_world(&mut commands, &mut images, &content, &settings, default()) {
         Ok(map_size) => {
             let window = windows.single().map_or(Vec2::new(1600.0, 900.0), Window::size);
             camera::spawn(&mut commands, map_size, window);

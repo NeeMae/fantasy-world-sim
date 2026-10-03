@@ -14,7 +14,7 @@ const PARENT: &str = "parent";
 const ABSTRACT: &str = "abstract";
 
 /// Def kinds a def file may contain, in the order they're built.
-const KINDS: &[&str] = &["biomes"];
+const KINDS: &[&str] = &["biomes", "reliefs"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContentError {
@@ -75,8 +75,7 @@ pub fn load_packs<P: AsRef<Path>>(packs: &[P]) -> Result<Registry, ContentError>
         manifests.push(manifest);
     }
 
-    let biomes = build_kind(kinds.remove("biomes").unwrap_or_default())?;
-    Registry::new(manifests, biomes)
+    build_registry(manifests, kinds)
 }
 
 /// Parses one def file's worth of RON as if it were the only pack.
@@ -86,7 +85,16 @@ pub fn load_str(source: &str) -> Result<Registry, ContentError> {
     let value: Value = ron::from_str(source)
         .map_err(|source| ContentError::Parse { path: "<string>".into(), source: Box::new(source) })?;
     add_def_file(&mut kinds, Path::new("<string>"), value)?;
-    Registry::new(Vec::new(), build_kind(kinds.remove("biomes").unwrap_or_default())?)
+    build_registry(Vec::new(), kinds)
+}
+
+fn build_registry(
+    manifests: Vec<PackManifest>,
+    mut kinds: HashMap<&'static str, RawKind>,
+) -> Result<Registry, ContentError> {
+    let biomes = build_kind(kinds.remove("biomes").unwrap_or_default())?;
+    let reliefs = build_kind(kinds.remove("reliefs").unwrap_or_default())?;
+    Registry::new(manifests, biomes, reliefs)
 }
 
 fn parse_file<T: DeserializeOwned>(path: &Path) -> Result<T, ContentError> {
@@ -277,6 +285,20 @@ mod tests {
         let sea = &reg.biomes()[0];
         assert!(sea.water && sea.name == "Sea");
         assert_eq!(sea.color, crate::Rgb(0, 0, 0x88));
+    }
+
+    #[test]
+    fn reliefs_load_and_default_to_flat() {
+        let none = load_str(r#"(biomes: [(id: "sea")])"#).unwrap();
+        assert_eq!(none.reliefs().len(), 1);
+        assert_eq!(none.reliefs()[0].id, "flat");
+
+        let some =
+            load_str(r#"(reliefs: [(id: "flat"), (id: "hills", ruggedness: (0.3, 0.6), glyph: "hills")])"#)
+                .unwrap();
+        let hills = some.relief(some.relief_id("hills").unwrap());
+        assert_eq!(hills.glyph, crate::Glyph::Hills);
+        assert_eq!(hills.ruggedness, crate::Range(0.3, 0.6));
     }
 
     #[test]

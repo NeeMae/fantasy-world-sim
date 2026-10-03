@@ -10,9 +10,15 @@
 //! world sea, whatever the seed.
 
 use content::{BiomeId, Registry};
-use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use std::collections::HashMap;
+
+use content::ReliefId;
+use noise::{Fbm, MultiFractal, NoiseFn, Perlin, RidgedMulti};
 use rayon::prelude::*;
-use sim_core::{Terrain, Topology, World, Wrap, rng};
+use sim_core::{Geology, Plate, Terrain, Topology, World, Wrap, rng};
+use tectonics::{PlateLayer, smoothstep};
+
+mod tectonics;
 
 /// What happens at the map's edges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,27 +95,52 @@ pub enum WorldGenError {
 
 /// Independent noise layers, each seeded from the world seed.
 struct Layers {
-    /// Broad shapes: where the continents and ocean basins are.
+    /// Continental crust: broad swells and basins that decide where land
+    /// is, independently of plate outlines (as on Earth, most coasts are
+    /// not plate boundaries).
     continents: Fbm<Perlin>,
-    /// Coastline wiggle, ridges and hills on top of the continents.
+    /// Coastline wiggle and small hills.
     detail: Fbm<Perlin>,
-    /// Distorts the coordinates the elevation layers are sampled at, so
-    /// landmasses get swirled, irregular shapes rather than round blobs.
+    /// Sharp crests that turn tectonic uplift into ridgelines and valleys.
+    ridges: RidgedMulti<Perlin>,
+    /// Distorts the coordinates the terrain is sampled at, so plate
+    /// boundaries and coasts wander instead of running straight.
     warp: Fbm<Perlin>,
+    /// A broader, stronger warp for plate boundaries alone, so plates are
+    /// irregular rather than convex cells.
+    plate_warp: Fbm<Perlin>,
     moisture: Fbm<Perlin>,
     /// Wobbles climate bands so they don't follow lines of latitude exactly.
     climate: Fbm<Perlin>,
+    major_plates: PlateLayer,
+    minor_plates: PlateLayer,
     continent_scale: f64,
 }
 
+/// The land at one point, before normalisation.
+struct Land {
+    elevation: f64,
+    ruggedness: f64,
+    plate: tectonics::Site,
+    stress: f64,
+}
+
 impl Layers {
-    fn new(seed: u64, continent_scale: f64, world_size: f64, rows: u32) -> Self {
+    fn new(params: &WorldGenParams) -> Self {
+        let (seed, continent_scale) = (params.seed, params.continent_scale);
         let layer_seed = |layer| rng::mix(seed, 0, layer, rng::purpose::WORLDGEN) as u32;
         // Skip detail octaves finer than about three hexes: they can't be
         // drawn and only add speckle. Each octave doubles the frequency.
         const DETAIL_FREQUENCY: f64 = 3.2;
-        let cycles = DETAIL_FREQUENCY * world_size; // base cycles per map height
-        let detail_octaves = ((rows as f64 / (3.0 * cycles)).log2().floor() as i64 + 1).clamp(1, 5) as usize;
+        let cycles = DETAIL_FREQUENCY * params.world_size; // base cycles per map height
+        let detail_octaves =
+            ((params.height as f64 / (3.0 * cycles)).log2().floor() as i64 + 1).clamp(1, 5) as usize;
+        let three_d = params.wrap == Wrap::X;
+        let mut major_plates = PlateLayer::new(seed, 0, 1.0 * continent_scale, three_d);
+        let mut minor_plates = PlateLayer::new(seed, 1, 0.38 * continent_scale, three_d);
+        let (min, max) = noise_bounds(params);
+        major_plates.prepare(min, max);
+        minor_plates.prepare(min, max);
         Layers {
             continents: Fbm::<Perlin>::new(layer_seed(0))
                 .set_octaves(3)
@@ -119,20 +150,69 @@ impl Layers {
                 .set_octaves(detail_octaves)
                 .set_frequency(DETAIL_FREQUENCY)
                 .set_persistence(0.5),
+            ridges: RidgedMulti::<Perlin>::new(layer_seed(5)).set_octaves(4).set_frequency(5.0),
             warp: Fbm::<Perlin>::new(layer_seed(4)).set_octaves(3).set_frequency(1.4 / continent_scale),
+            plate_warp: Fbm::<Perlin>::new(layer_seed(6)).set_octaves(2).set_frequency(0.8 / continent_scale),
             moisture: Fbm::<Perlin>::new(layer_seed(1)).set_octaves(4).set_frequency(2.2),
             climate: Fbm::<Perlin>::new(layer_seed(2)).set_octaves(3).set_frequency(3.0),
+            major_plates,
+            minor_plates,
             continent_scale,
         }
     }
 
-    /// Raw elevation at `p`: domain-warped continents plus detail.
-    fn elevation(&self, p: [f64; 3]) -> f64 {
+    /// The land at noise-space point `p`.
+    fn land(&self, p: [f64; 3]) -> Land {
         let strength = 0.25 * self.continent_scale;
         let offset = |o: f64| self.warp.get([p[0] + o, p[1] - o, p[2] + o]) * strength;
         let q = [p[0] + offset(10.0), p[1] + offset(20.0), p[2] + offset(30.0)];
-        self.continents.get(q) + self.detail.get(q) * 0.35
+
+        let plate_offset =
+            |o: f64| self.plate_warp.get([q[0] - o, q[1] + o, q[2] - o]) * 0.4 * self.continent_scale;
+        let pq = [q[0] + plate_offset(40.0), q[1] + plate_offset(50.0), q[2] + plate_offset(60.0)];
+        // Continental crust: broad swells that decide where land is. Plates
+        // see the same field (offset by the plate warp) to judge each side
+        // of a boundary.
+        let crust = |x: [f64; 3]| self.continents.get(x);
+        let t = tectonics::evaluate(&self.major_plates, &self.minor_plates, pq, |x| {
+            crust([x[0] - pq[0] + q[0], x[1] - pq[1] + q[1], x[2] - pq[2] + q[2]])
+        });
+        let detail = self.detail.get(q);
+        // Ridged noise is ~[-1, 1]; as 0..1 it carves uplift into crests.
+        let crest = ((self.ridges.get(q) + 1.0) / 2.0).clamp(0.0, 1.0);
+        let elevation = crust(q) * 0.6 + detail * 0.18 + t.uplift + t.orogeny * (0.55 + 0.45 * crest);
+        // Rugged ground follows the crests, so uplift reads as ridgelines
+        // with gentler ground between rather than solid massifs.
+        let ruggedness = (t.orogeny * (0.2 + 0.8 * crest * crest) * 1.5 + detail.abs() * 0.1).clamp(0.0, 1.0);
+        Land { elevation, ruggedness, plate: t.plate, stress: t.stress }
     }
+}
+
+/// The noise-space box the map samples, padded for domain warping.
+fn noise_bounds(params: &WorldGenParams) -> ([f64; 3], [f64; 3]) {
+    let span = params.width as f64 * 0.75 / (3f64.sqrt() / 2.0) / params.height as f64;
+    let ws = params.world_size;
+    let pad = 1.5 * params.continent_scale;
+    match params.wrap {
+        Wrap::X => {
+            let r = span * ws / std::f64::consts::TAU + pad;
+            ([-r, -r, -ws / 2.0 - pad], [r, r, ws / 2.0 + pad])
+        }
+        Wrap::None => {
+            let (hx, hy) = (span * ws / 2.0 + pad, ws / 2.0 + pad);
+            ([-hx, -hy, 0.0], [hx, hy, 0.0])
+        }
+    }
+}
+
+/// Raw values for one hex, before normalisation.
+struct Sample {
+    elevation: f32,
+    moisture: f32,
+    warmth: f32,
+    ruggedness: f32,
+    plate: tectonics::Site,
+    stress: f32,
 }
 
 pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, WorldGenError> {
@@ -149,24 +229,40 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         return Err(WorldGenError::OddWrapWidth(params.width));
     }
     let topology = Topology::new(params.width, params.height, params.wrap);
-    let layers = Layers::new(params.seed, params.continent_scale, params.world_size, params.height);
+    let layers = Layers::new(params);
 
-    let samples: Vec<(f32, f32, f32)> = (0..topology.len() as u32)
+    let samples: Vec<Sample> = (0..topology.len() as u32)
         .into_par_iter()
         .map(|i| sample(&topology, &layers, params, sim_core::HexId(i)))
         .collect();
 
     let mut terrain = Terrain::new(topology.len());
-    for (i, (e, m, latitude)) in samples.into_iter().enumerate() {
-        terrain.elevation[i] = e;
-        terrain.moisture[i] = m;
-        terrain.temperature[i] = latitude;
+    let mut geology = Geology::default();
+    // Plates are numbered in order of first appearance, so ids are stable.
+    let mut plate_ids: HashMap<[i32; 3], u16> = HashMap::new();
+    for (i, s) in samples.into_iter().enumerate() {
+        terrain.elevation[i] = s.elevation;
+        terrain.moisture[i] = s.moisture;
+        terrain.temperature[i] = s.warmth;
+        terrain.ruggedness[i] = s.ruggedness;
+        let next = plate_ids.len() as u16;
+        let id = *plate_ids.entry(s.plate.cell).or_insert_with(|| {
+            geology.plates.push(Plate { continental: false });
+            next
+        });
+        geology.plate.push(id);
+        geology.stress.push(s.stress);
     }
     to_percentiles(&mut terrain.elevation);
     to_percentiles(&mut terrain.moisture);
-    // Higher ground is colder.
-    for (t, e) in terrain.temperature.iter_mut().zip(&terrain.elevation) {
-        *t = (*t - (e - 0.6).max(0.0) * 0.5).clamp(0.0, 1.0);
+    // The highest ground is broken country even away from plate
+    // boundaries: plateaus and old uplands become at least hills.
+    for (r, e) in terrain.ruggedness.iter_mut().zip(&terrain.elevation) {
+        *r = (*r + smoothstep(0.86, 1.0, *e as f64) as f32 * 0.45).min(1.0);
+    }
+    // Higher and more rugged ground is colder, so ranges carry snow.
+    for ((t, e), r) in terrain.temperature.iter_mut().zip(&terrain.elevation).zip(&terrain.ruggedness) {
+        *t = (*t - (e - 0.62).max(0.0) * 0.6 - r * 0.12).clamp(0.0, 1.0);
     }
     terrain.biome = terrain
         .elevation
@@ -175,17 +271,31 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         .zip(&terrain.temperature)
         .map(|((&e, &m), &t)| choose_biome(registry, e, m, t))
         .collect();
+    // Relief is a property of land; seas are flat.
+    for (r, b) in terrain.ruggedness.iter_mut().zip(&terrain.biome) {
+        if registry.biome(*b).water {
+            *r = 0.0;
+        }
+    }
+    terrain.relief = terrain.ruggedness.iter().map(|&r| choose_relief(registry, r)).collect();
+    // A plate counts as continental if most of it (on this map) is land.
+    let mut land = vec![(0u32, 0u32); geology.plates.len()];
+    for (plate, biome) in geology.plate.iter().zip(&terrain.biome) {
+        let entry = &mut land[*plate as usize];
+        entry.0 += !registry.biome(*biome).water as u32;
+        entry.1 += 1;
+    }
+    for (plate, (land, total)) in geology.plates.iter_mut().zip(land) {
+        plate.continental = land * 2 > total;
+    }
 
-    Ok(World::new(params.seed, topology, terrain))
+    let mut world = World::new(params.seed, topology, terrain);
+    world.geology = geology;
+    Ok(world)
 }
 
-/// Raw `(elevation, moisture, latitude warmth)` for one hex.
-fn sample(
-    topology: &Topology,
-    layers: &Layers,
-    params: &WorldGenParams,
-    hex: sim_core::HexId,
-) -> (f32, f32, f32) {
+/// Raw values for one hex.
+fn sample(topology: &Topology, layers: &Layers, params: &WorldGenParams, hex: sim_core::HexId) -> Sample {
     let (col, row) = topology.offset(hex);
     let (w, h) = (topology.width() as f64, topology.height() as f64);
     // Hex centre in "rows" units: columns are 3/4 of a hex width apart and
@@ -211,7 +321,8 @@ fn sample(
         }
     };
 
-    let mut elevation = layers.elevation(point(0.0));
+    let land = layers.land(point(0.0));
+    let mut elevation = land.elevation;
     if params.edges == EdgeStyle::Ocean {
         // A gentle slope down from the middle across the whole map makes
         // land more likely towards the centre without dictating where the
@@ -235,12 +346,14 @@ fn sample(
         Latitudes::Span { north, south } => north + (south - north) * v,
         Latitudes::Globe => 1.0 - (v - 0.5).abs() * 2.0,
     } + layers.climate.get(point(200.0)) * 0.12;
-    (elevation as f32, moisture as f32, latitude_warmth as f32)
-}
-
-fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    Sample {
+        elevation: elevation as f32,
+        moisture: moisture as f32,
+        warmth: latitude_warmth as f32,
+        ruggedness: land.ruggedness as f32,
+        plate: land.plate,
+        stress: land.stress as f32,
+    }
 }
 
 /// Replaces each value with its rank as a fraction in `0.0..=1.0`.
@@ -252,6 +365,20 @@ fn to_percentiles(values: &mut [f32]) {
     for (rank, i) in order.into_iter().enumerate() {
         values[i as usize] = rank as f32 / last;
     }
+}
+
+/// The highest-priority relief whose ruggedness range contains `r`; the
+/// first relief if none match.
+fn choose_relief(registry: &Registry, r: f32) -> ReliefId {
+    registry
+        .reliefs()
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.ruggedness.contains(r))
+        .rev()
+        .max_by_key(|(_, d)| d.priority)
+        .map(|(i, _)| ReliefId(i as u8))
+        .unwrap_or_default()
 }
 
 /// The highest-priority biome matching the climate; the first biome if none match.

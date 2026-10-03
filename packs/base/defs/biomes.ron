@@ -6,6 +6,10 @@
 //
 // The matching biome with the highest `priority` wins. Ranges default to
 // "anything", so a biome only needs to state what makes it special.
+//
+// Hills and mountains are not biomes: they're relief (see reliefs.ron),
+// layered on top, so a hex can be forested hills or desert mountains.
+// High ranges still turn to tundra and glacier because altitude is cold.
 (
     biomes: [
         // ---- Water ---------------------------------------------------------
@@ -41,12 +45,5 @@
         (id: "swamp", parent: "land_base", name: "Swamp", color: "#536b49",
             elevation: (0.55, 0.6), moisture: (0.85, 1.0), temperature: (0.35, 1.0), priority: 3),
 
-        // ---- Highlands (override climate) ----------------------------------
-        (id: "hills", parent: "land_base", name: "Hills", color: "#8d8a57",
-            elevation: (0.9, 0.96), priority: 4),
-        (id: "mountains", parent: "land_base", name: "Mountains", color: "#776d66",
-            elevation: (0.96, 0.99), priority: 5),
-        (id: "peaks", parent: "land_base", name: "Snowy Peaks", color: "#e4e8ec",
-            elevation: (0.99, 1.0), priority: 6),
     ],
 )

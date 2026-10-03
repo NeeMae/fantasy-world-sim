@@ -1,4 +1,4 @@
-use content::BiomeId;
+use content::{BiomeId, ReliefId};
 use serde::{Deserialize, Serialize};
 
 use crate::HexId;
@@ -11,11 +11,11 @@ use crate::HexId;
 /// the seed, content and the command log (each tagged with its tick).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Reshape every hex within `radius` of `center` into `biome`.
+    /// Paint every hex within `radius` of `center`.
     ///
     /// Consecutive reshapes with the same `edit` (e.g. one brush stroke)
     /// form a single step for [`Command::Undo`].
-    Reshape { center: HexId, radius: u32, biome: BiomeId, edit: EditId },
+    Reshape { center: HexId, radius: u32, paint: Paint, edit: EditId },
     /// Revert the most recent edit still in the journal.
     Undo,
     /// Re-apply the most recently undone edit, if nothing new happened since.
@@ -26,3 +26,10 @@ pub enum Command {
 /// it only needs to differ from the previous edit's id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EditId(pub u64);
+
+/// What a [`Command::Reshape`] paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Paint {
+    Biome(BiomeId),
+    Relief(ReliefId),
+}

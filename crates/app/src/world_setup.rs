@@ -10,7 +10,7 @@ use worldgen::{EdgeStyle, Latitudes, WorldGenParams};
 use crate::camera::{self, MapCamera};
 use crate::map_view::{self, MapEntity};
 use crate::sim_thread::SimThread;
-use crate::tools::{Hover, Selection};
+use crate::tools::{Hover, MapModeSetting, Selection};
 
 /// Detail presets: how many hex rows tall the map is. The same world is
 /// drawn at every scale, just with finer or coarser hexes.
@@ -121,6 +121,7 @@ pub fn start_world(
     images: &mut Assets<Image>,
     content: &Content,
     settings: &WorldSettings,
+    mode: map_raster::MapMode,
 ) -> Result<Vec2, String> {
     let params = settings.params()?;
     let world = worldgen::generate(&params, &content.0).map_err(|e| e.to_string())?;
@@ -128,7 +129,7 @@ pub fn start_world(
         "generated {}×{} world with seed {} (world size {}, wrap {})",
         params.width, params.height, params.seed, params.world_size, settings.wrap
     );
-    let size = map_view::spawn(commands, images, content.0.clone(), &world);
+    let size = map_view::spawn(commands, images, content.0.clone(), &world, mode);
     // Replacing the resource drops the old handle, which stops the old thread.
     commands.insert_resource(SimThread::spawn(Simulation::new(world, content.0.clone())));
     Ok(size)
@@ -140,6 +141,7 @@ pub fn regenerate(
     mut images: ResMut<Assets<Image>>,
     content: Res<Content>,
     settings: Res<WorldSettings>,
+    mode: Res<MapModeSetting>,
     old: Query<Entity, With<MapEntity>>,
     windows: Query<&Window>,
     mut camera: Query<(&Camera, &mut Transform, &mut Projection, &mut MapCamera)>,
@@ -149,7 +151,7 @@ pub fn regenerate(
     if requests.read().count() == 0 {
         return;
     }
-    match start_world(&mut commands, &mut images, &content, &settings) {
+    match start_world(&mut commands, &mut images, &content, &settings, mode.0) {
         Ok(size) => {
             for entity in &old {
                 commands.entity(entity).despawn();

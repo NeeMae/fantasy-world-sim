@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use content::BiomeId;
-use sim_core::{Command, EditId, HexId, World};
+use sim_core::{Command, EditId, HexId, Paint, World};
 
 use crate::map_view::MapView;
 use crate::sim_thread::SimThread;
@@ -20,7 +20,8 @@ pub const MAX_BRUSH_RADIUS: u32 = 12;
 #[derive(Resource)]
 pub struct ToolState {
     pub tool: Tool,
-    pub brush_biome: BiomeId,
+    /// What the brush paints: a biome or a relief level.
+    pub brush: Paint,
     pub brush_radius: u32,
     /// Id for the next brush stroke, so each stroke is one undo step.
     next_edit: u64,
@@ -28,7 +29,7 @@ pub struct ToolState {
 
 impl Default for ToolState {
     fn default() -> Self {
-        ToolState { tool: Tool::Inspect, brush_biome: BiomeId(0), brush_radius: 2, next_edit: 0 }
+        ToolState { tool: Tool::Inspect, brush: Paint::Biome(BiomeId(0)), brush_radius: 2, next_edit: 0 }
     }
 }
 
@@ -48,6 +49,10 @@ pub struct Hover(pub Option<HexId>);
 
 #[derive(Resource, Default)]
 pub struct Selection(pub Option<HexId>);
+
+/// Which map view is wanted; the map redraws when it changes.
+#[derive(Resource, Default)]
+pub struct MapModeSetting(pub map_raster::MapMode);
 
 /// Where the UI is, so map tools can ignore the pointer over it.
 ///
@@ -134,12 +139,7 @@ pub fn use_tool(
         None => vec![hex],
     };
     for center in path {
-        sim.submit(Command::Reshape {
-            center,
-            radius: tools.brush_radius,
-            biome: tools.brush_biome,
-            edit: *edit,
-        });
+        sim.submit(Command::Reshape { center, radius: tools.brush_radius, paint: tools.brush, edit: *edit });
     }
     *last = Some(hex);
     if released {

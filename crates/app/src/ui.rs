@@ -3,13 +3,14 @@
 use bevy::prelude::*;
 use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiContexts, egui};
-use content::BiomeId;
-use sim_core::{Command, Date};
+use content::{BiomeId, ReliefId};
+use map_raster::MapMode;
+use sim_core::{Command, Date, Paint};
 use worldgen::EdgeStyle;
 
 use crate::map_view::MapView;
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
-use crate::tools::{Hover, MAX_BRUSH_RADIUS, PointerOverUi, Selection, Tool, ToolState};
+use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, PointerOverUi, Selection, Tool, ToolState};
 use crate::world_setup::{
     ASPECTS, Climate, LARGE_WORLD, MAX_CANVAS, RegenerateRequest, SCALES, WorldSettings,
 };
@@ -24,6 +25,7 @@ pub fn panels(
     mut settings: ResMut<WorldSettings>,
     mut regenerate: MessageWriter<RegenerateRequest>,
     mut over_ui: ResMut<PointerOverUi>,
+    mut map_mode: ResMut<MapModeSetting>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let snap = sim.snapshot();
@@ -44,6 +46,14 @@ pub fn panels(
                 if ui.selectable_label(current == *speed, format!("{label} [{key}]")).clicked() {
                     sim.set_speed(*speed);
                 }
+            }
+            ui.separator();
+            for (mode, label) in [
+                (MapMode::Terrain, "Terrain"),
+                (MapMode::Elevation, "Elevation"),
+                (MapMode::Plates, "Plates"),
+            ] {
+                ui.selectable_value(&mut map_mode.0, mode, label).on_hover_text("M cycles map views");
             }
             ui.separator();
             if current != Speed::Paused {
@@ -68,7 +78,7 @@ pub fn panels(
             inspector_section(ui, &selection, &view, world);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view");
         });
     });
 
@@ -241,14 +251,19 @@ fn tools_section(
         return;
     }
     ui.add(egui::Slider::new(&mut tools.brush_radius, 0..=MAX_BRUSH_RADIUS).text("Brush radius"));
-    ui.label("Terrain");
+    ui.label("Relief");
+    ui.horizontal_wrapped(|ui| {
+        for (i, relief) in view.registry.reliefs().iter().enumerate() {
+            ui.selectable_value(&mut tools.brush, Paint::Relief(ReliefId(i as u8)), &relief.name);
+        }
+    });
+    ui.label("Biome");
     for (i, biome) in view.registry.biomes().iter().enumerate() {
-        let id = BiomeId(i as u16);
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
             let c = biome.color;
             ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(c.0, c.1, c.2));
-            ui.selectable_value(&mut tools.brush_biome, id, &biome.name);
+            ui.selectable_value(&mut tools.brush, Paint::Biome(BiomeId(i as u16)), &biome.name);
         });
     }
 }
@@ -270,6 +285,15 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
             ("Elevation", format!("{:.0}%", t.elevation[i] * 100.0)),
             ("Moisture", format!("{:.0}%", t.moisture[i] * 100.0)),
             ("Temperature", format!("{:.0}%", t.temperature[i] * 100.0)),
+            (
+                "Relief",
+                format!(
+                    "{} ({:.0}% rugged)",
+                    view.registry.relief(t.relief[i]).name,
+                    t.ruggedness[i] * 100.0
+                ),
+            ),
+            ("Plate", plate_description(world, i)),
         ] {
             ui.label(label);
             ui.label(value);
@@ -281,12 +305,25 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
     });
 }
 
+fn plate_description(world: &sim_core::World, i: usize) -> String {
+    let g = &world.geology;
+    let id = g.plate[i];
+    let kind = if g.plates[id as usize].continental { "continental" } else { "oceanic" };
+    let activity = match g.stress[i] {
+        s if s > 0.15 => ", colliding",
+        s if s < -0.15 => ", rifting",
+        _ => "",
+    };
+    format!("#{id} {kind}{activity}")
+}
+
 /// Space toggles pause; number keys pick a speed; I/B pick tools; [ ] resize the brush.
 pub fn hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     egui: Res<EguiWantsInput>,
     mut sim: ResMut<SimThread>,
     mut tools: ResMut<ToolState>,
+    mut map_mode: ResMut<MapModeSetting>,
 ) {
     if egui.wants_any_keyboard_input() {
         return;
@@ -300,6 +337,13 @@ pub fn hotkeys(
         if keys.just_pressed(key) {
             sim.set_speed(SPEEDS[i + 1].1);
         }
+    }
+    if keys.just_pressed(KeyCode::KeyM) {
+        map_mode.0 = match map_mode.0 {
+            MapMode::Terrain => MapMode::Elevation,
+            MapMode::Elevation => MapMode::Plates,
+            MapMode::Plates => MapMode::Terrain,
+        };
     }
     if keys.just_pressed(KeyCode::KeyI) {
         tools.tool = Tool::Inspect;

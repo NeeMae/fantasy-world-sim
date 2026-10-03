@@ -1,14 +1,13 @@
-use content::BiomeId;
 use serde::{Deserialize, Serialize};
 
-use crate::HexId;
+use crate::{HexId, command::Paint};
 
 /// Something that happened, recorded as data so it can be rendered as prose,
 /// filtered into timelines, or exported as lore.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EventKind {
     /// The land around a hex was remade by an outside power.
-    TerrainReshaped { center: HexId, radius: u32, to: BiomeId, hexes_changed: u32 },
+    TerrainReshaped { center: HexId, radius: u32, to: Paint, hexes_changed: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

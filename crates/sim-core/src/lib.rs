@@ -12,8 +12,8 @@ pub mod time;
 pub mod world;
 
 pub use chronicle::{Chronicle, Entry, EventKind};
-pub use command::{Command, EditId};
+pub use command::{Command, EditId, Paint};
 pub use hex::{Axial, HexId, Topology, Wrap, round_axial};
 pub use sim::Simulation;
 pub use time::Date;
-pub use world::{Terrain, World};
+pub use world::{Geology, Plate, Terrain, World};
