@@ -1,5 +1,5 @@
 //! Runs the simulation on its own thread so the window stays smooth at any
-//! sim speed. The renderer only ever reads the latest published [`Snapshot`].
+//! sim speed. The view only ever reads the latest published [`Snapshot`].
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::Resource;
-use sim_core::{Command, Simulation, World};
+use sim_core::{Command, HexId, Simulation, World};
 
 /// How fast the simulation runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,33 +35,43 @@ enum Control {
 #[derive(Clone)]
 pub struct Snapshot {
     pub tick: u64,
-    /// Republished only when the world's terrain changes, since cloning it
-    /// every tick would be wasteful.
+    /// Republished only when the world changes in a way the view draws,
+    /// since cloning it every tick would be wasteful.
     pub world: Arc<World>,
     pub ticks_per_second: f64,
 }
 
+struct Shared {
+    snapshot: Mutex<Snapshot>,
+    /// Hexes changed since the view last asked, so it can redraw just those.
+    changed: Mutex<Vec<HexId>>,
+}
+
+/// Handle to the simulation thread. Dropping it stops the thread.
 #[derive(Resource)]
 pub struct SimThread {
     control: Sender<Control>,
-    snapshot: Arc<Mutex<Snapshot>>,
+    shared: Arc<Shared>,
     speed: Speed,
 }
 
 impl SimThread {
     pub fn spawn(mut sim: Simulation) -> Self {
-        let snapshot = Arc::new(Mutex::new(Snapshot {
-            tick: sim.world().tick,
-            world: Arc::new(sim.world().clone()),
-            ticks_per_second: 0.0,
-        }));
+        let shared = Arc::new(Shared {
+            snapshot: Mutex::new(Snapshot {
+                tick: sim.world().tick,
+                world: Arc::new(sim.world().clone()),
+                ticks_per_second: 0.0,
+            }),
+            changed: Mutex::new(Vec::new()),
+        });
         let (control, rx) = mpsc::channel();
-        let shared = snapshot.clone();
+        let thread_shared = shared.clone();
         thread::Builder::new()
             .name("simulation".into())
-            .spawn(move || run(&mut sim, &rx, &shared))
+            .spawn(move || run(&mut sim, &rx, &thread_shared))
             .expect("failed to start simulation thread");
-        SimThread { control, snapshot, speed: Speed::Paused }
+        SimThread { control, shared, speed: Speed::Paused }
     }
 
     pub fn speed(&self) -> Speed {
@@ -73,18 +83,23 @@ impl SimThread {
         let _ = self.control.send(Control::SetSpeed(speed));
     }
 
+    /// Sends a command. It's applied as soon as the simulation is between
+    /// ticks, which is immediately when paused.
     pub fn submit(&self, command: Command) {
         let _ = self.control.send(Control::Submit(command));
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        self.snapshot.lock().expect("simulation thread panicked").clone()
+        self.shared.snapshot.lock().expect("simulation thread panicked").clone()
+    }
+
+    pub fn take_changed_hexes(&self) -> Vec<HexId> {
+        std::mem::take(&mut *self.shared.changed.lock().expect("simulation thread panicked"))
     }
 }
 
-fn run(sim: &mut Simulation, rx: &Receiver<Control>, shared: &Mutex<Snapshot>) {
+fn run(sim: &mut Simulation, rx: &Receiver<Control>, shared: &Shared) {
     let mut speed = Speed::Paused;
-    let mut published_revision = sim.world().terrain_revision;
     let mut next_tick = Instant::now();
     // Measured rate, over roughly one-second windows.
     let (mut window_start, mut window_ticks) = (Instant::now(), 0u64);
@@ -96,46 +111,66 @@ fn run(sim: &mut Simulation, rx: &Receiver<Control>, shared: &Mutex<Snapshot>) {
             Speed::Max => Duration::ZERO,
             Speed::TicksPerSecond(_) => next_tick.saturating_duration_since(Instant::now()),
         };
+        let mut batch = 0;
         match rx.recv_timeout(wait) {
             Ok(Control::SetSpeed(s)) => {
                 speed = s;
                 next_tick = Instant::now();
-                continue;
             }
             Ok(Control::Submit(cmd)) => {
                 sim.submit(cmd);
-                continue;
+                // Drain any queued commands too (e.g. a fast brush stroke)
+                // so they're published together.
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        Control::Submit(cmd) => sim.submit(cmd),
+                        Control::SetSpeed(s) => speed = s,
+                    }
+                }
+                sim.apply_pending();
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            // The app has closed.
+            Err(RecvTimeoutError::Timeout) => {
+                batch = match speed {
+                    Speed::Paused => 0,
+                    Speed::Max => 64,
+                    Speed::TicksPerSecond(tps) => {
+                        next_tick += Duration::from_secs_f64(1.0 / tps);
+                        // Don't try to catch up after a stall; just carry on.
+                        if next_tick < Instant::now() {
+                            next_tick = Instant::now();
+                        }
+                        1
+                    }
+                };
+            }
+            // The app has closed or started a new world.
             Err(RecvTimeoutError::Disconnected) => return,
         }
 
-        let batch = match speed {
-            Speed::Paused => 0,
-            Speed::Max => 64,
-            Speed::TicksPerSecond(tps) => {
-                next_tick += Duration::from_secs_f64(1.0 / tps);
-                // Don't try to catch up after a stall; just carry on.
-                if next_tick < Instant::now() {
-                    next_tick = Instant::now();
-                }
-                1
-            }
-        };
         sim.run(batch);
         window_ticks += batch;
+        publish(sim, shared);
 
-        let mut snap = shared.lock().expect("view thread panicked");
-        snap.tick = sim.world().tick;
-        if sim.world().terrain_revision != published_revision {
-            published_revision = sim.world().terrain_revision;
-            snap.world = Arc::new(sim.world().clone());
-        }
         let elapsed = window_start.elapsed().as_secs_f64();
         if elapsed >= 1.0 || speed == Speed::Paused {
-            snap.ticks_per_second = window_ticks as f64 / elapsed.max(1e-9);
+            shared.snapshot.lock().expect("view thread panicked").ticks_per_second =
+                window_ticks as f64 / elapsed.max(1e-9);
             (window_start, window_ticks) = (Instant::now(), 0);
         }
+    }
+}
+
+fn publish(sim: &mut Simulation, shared: &Shared) {
+    let changed = sim.take_changed_hexes();
+    {
+        let mut snap = shared.snapshot.lock().expect("view thread panicked");
+        snap.tick = sim.world().tick;
+        if !changed.is_empty() {
+            snap.world = Arc::new(sim.world().clone());
+        }
+    }
+    // After the world is published, so the view never redraws stale terrain.
+    if !changed.is_empty() {
+        shared.changed.lock().expect("view thread panicked").extend(changed);
     }
 }

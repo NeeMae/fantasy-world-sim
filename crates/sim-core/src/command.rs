@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::HexId;
 
-/// A request to change the world, applied at the start of the next tick.
+/// A request to change the world from outside its own systems.
 ///
-/// Everything that changes the world from outside the systems goes through
-/// here: god powers, a player ruler's orders and AI decisions alike. A save
-/// file can therefore be just the seed, content and the command log.
+/// Everything that changes the world from outside goes through here: god
+/// powers, a player ruler's orders and AI decisions alike. Commands are
+/// applied *between* ticks, in submission order, so a save file can be just
+/// the seed, content and the command log (each tagged with its tick).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Reshape a hex into another biome.
-    SetBiome { hex: HexId, biome: BiomeId },
+    /// Reshape every hex within `radius` of `center` into `biome`.
+    Reshape { center: HexId, radius: u32, biome: BiomeId },
 }

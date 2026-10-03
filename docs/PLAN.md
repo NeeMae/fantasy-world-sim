@@ -88,11 +88,13 @@ trivially serialisable.
 
 | Layer | Contents |
 |---|---|
-| Terrain | Elevation, moisture, temperature → biome; rivers; resources |
-| Provinces | Clusters of hexes; the unit of ownership (the "stars" of Galimulator) |
-| Peoples | Races and cultures: biome preferences, traits, growth, temperament |
-| Settlements | Population, food, wealth, defence; village → town → city → capital |
-| Factions | Kingdoms, empires, city-states, hordes, theocracies; ruler, dynasty, stability, treasury, personality weights |
+| Terrain | Elevation, moisture, temperature → biome; rivers; resources; fertility and travel cost from biome defs |
+| Peoples | Races, cultures (with languages) and religions; biome preferences, traits, growth, lifespans, temperament |
+| Population | Per-settlement demographic mix: groups of `(race, culture, religion, size)` that grow, migrate, assimilate and convert |
+| Settlements | Founded *dynamically* where people gather; population, food, wealth, defence; hamlet → village → town → city |
+| Counties | The territory a settlement controls (its hinterland), grown outward by travel cost; the smallest region and unit of ownership |
+| Titles | County → Duchy → Kingdom → Empire, Crusader Kings-style, formed around counties rather than drawn in advance |
+| Realms | A title holder plus vassals: kingdoms, empires, city-states, hordes, theocracies; ruler, dynasty, stability, treasury, personality weights |
 | Characters | Rulers, heirs, generals, heroes, archmages; age, traits, ambition, relationships |
 | Forces | Armies, monsters, migrations moving on the province graph |
 | Overlays | Religion, magic/ley lines, trade routes, cellular hazards |
@@ -115,6 +117,34 @@ results never depend on thread scheduling.
 
 Randomness in parallel phases uses per-entity RNG streams derived from
 `(world_seed, tick, entity_id)`, never a shared RNG.
+
+## Regions grow from people, not the other way round
+
+There are no pre-drawn provinces. Peoples start at a few origin points and
+spread; when enough people gather on good land, a **settlement** is
+founded. Each settlement claims a **county**: the surrounding hexes it can
+reach most cheaply, so counties are small in rich farmland and large in
+steppe or tundra, and borders follow rivers and ridges naturally. Counties
+average roughly 10–25 hexes on fertile land.
+
+Higher **titles** form around counties: a ruler who holds enough counties in
+a region can found a duchy, enough duchies a kingdom, and so on. Titles
+persist after the realm that created them falls, so they can be claimed,
+usurped and re-formed, which is where the CK-style stories come from.
+
+Not every culture is feudal. Title *tiers* are universal, but cultures
+name and run them differently (chiefdom → tribe → confederacy, or
+city-state → league), defined in culture defs.
+
+## World settings
+
+Chosen at generation and stored in the world, so they're part of determinism:
+
+- **Volatility** (calm ↔ chaotic): scales unrest growth, rebellion
+  thresholds, AI aggression, succession-crisis odds and catastrophe
+  frequency. Calm worlds grow long-lived empires; chaotic ones churn.
+- History is balanced for good stories over roughly **2,000 years**.
+- Later: magic level, monster density, starting peoples.
 
 ## Emergent dynamics (the Galimulator engine)
 
@@ -160,10 +190,10 @@ Anything not specified is generated.
 | Religions & magic | Doctrines, schools, effects |
 | Monsters | Spawning rules, behaviours |
 | Events | Scripted or conditional events ("in year 300, the Lich awakens") |
-| Name lists | Per-culture syllable/markov name tables |
+| Languages | Per-culture phonology in the culture def: sounds, syllable shapes, forbidden clusters, and templates for people, places and titles, so each culture names things in its own style |
 
 Schema validation produces clear errors in the app and CLI. Defs come first;
-Rhai is introduced with the event system (Phase 5).
+Rhai is introduced with the event system (Phase 6).
 
 ## Art
 
@@ -183,17 +213,19 @@ tileset is a drop-in replacement.
 
 | Phase | Goal | Done when |
 |---|---|---|
-| 0. Skeleton | Cargo workspace, headless tick loop, seeded RNG, Bevy window drawing a hex grid, CI | `sim-cli` runs N ticks; app shows a pannable/zoomable hex map |
-| 1. Worldgen | Terrain, biomes, rivers, provinces, placeholder tiles, content-pack loading for biomes | Good-looking continent from a seed; a pack can override biomes/heightmap |
-| 2. Life | Peoples, settlements, factions, expansion, border rendering | Kingdoms grow and fill the map |
-| 3. Conflict | Diplomacy, armies, war, rebellion, secession | Empires rise and fall unattended over 1000+ years |
-| 4. Story | Characters, dynasties, succession, chronicle + inspector UI | Clicking a realm shows its history |
-| 5. Fantasy | Monsters, magic, religion, cellular hazards, catastrophes | Distinctly high fantasy |
-| 6. Play | Save/load (seed + command log), god powers, ruler mode, scenarios | Optional game layers work |
-| 7. Worldbuilding tools | Full user-defined content, map painting, lore export (Markdown/JSON) | Usable as a setting-design tool |
-| 8. Cylindrical worlds | `WrapX` topology: wrapping camera, borders and pathfinding across the seam | A world can be generated and simulated with east-west wrap |
+| 0. Skeleton ✅ | Cargo workspace, headless tick loop, seeded RNG, Bevy viewer, CI | `sim-cli` runs N ticks; app shows a pannable/zoomable hex map |
+| 0.5 Editor basics ✅ | Hex outlines, terrain brush, instant god powers, regenerate | Worlds can be rerolled and reshaped comfortably |
+| 1. Living land | Rivers and lakes; biome fertility and travel cost; race, culture and language defs; name generator; world settings (volatility) | Rivers carve the map; cultures generate distinct names |
+| 2. Peoples & settlements | Population groups, growth, migration; settlements founded dynamically; counties as settlement hinterlands; border and settlement rendering | Peoples spread from origins and settle the land into counties |
+| 3. Titles & realms | County → Duchy → Kingdom → Empire; titles formed around counties; realms, vassals, expansion | Kingdoms form and fill the map |
+| 4. Conflict | Diplomacy, armies, war, rebellion, secession, scaled by volatility | Empires rise and fall unattended over 2,000 years |
+| 5. Story | Characters, dynasties, succession, chronicle and inspector UI | Clicking a realm shows its history |
+| 6. Fantasy | Monsters, magic, religion, cellular hazards, catastrophes, Rhai events | Distinctly high fantasy |
+| 7. Play | Save/load (seed + command log), more god powers, ruler mode, scenarios | Optional game layers work |
+| 8. Worldbuilding tools | Import heightmaps and painted maps, lore export (Markdown/JSON) | Usable as a setting-design tool |
+| 9. Cylindrical worlds | `WrapX` topology: wrapping camera, borders and pathfinding across the seam | A world can be generated and simulated with east-west wrap |
 
-**MVP = phases 0–3.**
+**MVP = phases 0–4.**
 
 ## Performance targets (initial)
 
@@ -209,4 +241,10 @@ tileset is a drop-in replacement.
 | Tick length | One month |
 | World shape | Bounded rectangle now; optional east-west wrap later (Phase 8), kept possible via the `Topology` abstraction |
 | Content format | RON, RimWorld-style defs with inheritance and patching |
-| Scripting | Rhai, from Phase 5 |
+| Scripting | Rhai, introduced with events (Phase 6) |
+| Regions | No pre-drawn provinces: settlements emerge from population, counties form around settlements, titles form around counties |
+| Title tiers | County → Duchy → Kingdom → Empire, with culture-specific names and customs |
+| Population | Demographic mix per settlement (race, culture, religion groups) |
+| Smallest region | Counties, averaging roughly 10–25 hexes on fertile land |
+| History length | Balanced for about 2,000 years, with a world volatility setting |
+| Names | Per-culture language rules in culture defs |

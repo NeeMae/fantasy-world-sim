@@ -63,6 +63,19 @@ impl std::ops::Add for Axial {
     }
 }
 
+/// Rounds fractional axial coordinates to the containing hex.
+pub fn round_axial(q: f64, r: f64) -> Axial {
+    let s = -q - r;
+    let (mut rq, mut rr, rs) = (q.round(), r.round(), s.round());
+    let (dq, dr, ds) = ((rq - q).abs(), (rr - r).abs(), (rs - s).abs());
+    if dq > dr && dq > ds {
+        rq = -rr - rs;
+    } else if dr > ds {
+        rr = -rq - rs;
+    }
+    Axial::new(rq as i32, rr as i32)
+}
+
 /// Whether the map wraps around.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Wrap {
@@ -150,22 +163,67 @@ impl Topology {
         Axial::DIRECTIONS.into_iter().filter_map(move |d| topo.at_axial(a + d))
     }
 
-    /// Steps between two hexes, taking the short way round on wrapping maps.
-    pub fn distance(&self, a: HexId, b: HexId) -> u32 {
+    /// Every hex within `radius` steps of `center`, including `center` itself.
+    /// Hexes off the edge of a bounded map are skipped; on a wrapping map each
+    /// hex is yielded once even if the radius reaches round the world.
+    pub fn within(&self, center: HexId, radius: u32) -> Vec<HexId> {
+        let c = self.axial(center);
+        let r = radius as i32;
+        let mut out = Vec::with_capacity((3 * r * (r + 1) + 1) as usize);
+        for dq in -r..=r {
+            for dr in (-r).max(-dq - r)..=r.min(-dq + r) {
+                if let Some(id) = self.at_axial(c + Axial::new(dq, dr)) {
+                    out.push(id);
+                }
+            }
+        }
+        if self.wrap == Wrap::X && radius * 2 >= self.width {
+            out.sort_unstable();
+            out.dedup();
+        }
+        out
+    }
+
+    /// The hexes on a straight line from `a` to `b`, inclusive, each adjacent
+    /// to the next. Takes the short way round on wrapping maps.
+    pub fn line(&self, a: HexId, b: HexId) -> Vec<HexId> {
+        let (from, to) = (self.axial(a), self.nearest_image(a, b));
+        let n = from.distance(to) as i32;
+        if n == 0 {
+            return vec![a];
+        }
+        // Nudge off exact hex edges so ties always round the same way.
+        let (fq, fr) = (from.q as f64 + 1e-6, from.r as f64 + 2e-6);
+        let (tq, tr) = (to.q as f64 + 1e-6, to.r as f64 + 2e-6);
+        (0..=n)
+            .filter_map(|i| {
+                let t = i as f64 / n as f64;
+                self.at_axial(round_axial(fq + (tq - fq) * t, fr + (tr - fr) * t))
+            })
+            .collect()
+    }
+
+    /// `b`'s axial coordinates, shifted round the world if that's closer to `a`.
+    fn nearest_image(&self, a: HexId, b: HexId) -> Axial {
         let (a, b) = (self.axial(a), self.axial(b));
         match self.wrap {
-            Wrap::None => a.distance(b),
+            Wrap::None => b,
             Wrap::X => {
-                // Shifting by an even number of columns moves q by `width`
-                // and r by `-width / 2`.
                 let w = self.width as i32;
                 [-1, 0, 1]
                     .into_iter()
-                    .map(|k| a.distance(Axial::new(b.q + k * w, b.r - k * w / 2)))
-                    .min()
-                    .unwrap_or(0)
+                    .map(|k| Axial::new(b.q + k * w, b.r - k * w / 2))
+                    .min_by_key(|img| a.distance(*img))
+                    .unwrap_or(b)
             }
         }
+    }
+
+    /// Steps between two hexes, taking the short way round on wrapping maps.
+    pub fn distance(&self, a: HexId, b: HexId) -> u32 {
+        // Shifting by an even number of columns moves q by `width` and r by
+        // `-width / 2`, which is how `nearest_image` looks round the world.
+        self.axial(a).distance(self.nearest_image(a, b))
     }
 }
 
@@ -201,6 +259,37 @@ mod tests {
         assert_eq!(t.neighbors(t.at(0, 0).unwrap()).count(), 2);
         assert_eq!(t.neighbors(t.at(0, 5).unwrap()).count(), 4);
         assert_eq!(t.distance(t.at(0, 5).unwrap(), t.at(9, 5).unwrap()), 9);
+    }
+
+    #[test]
+    fn lines_are_connected_and_shortest() {
+        for wrap in [Wrap::None, Wrap::X] {
+            let t = Topology::new(30, 20, wrap);
+            for (a, b) in [((2, 3), (25, 17)), ((5, 5), (5, 5)), ((0, 10), (29, 2)), ((10, 1), (11, 19))] {
+                let (a, b) = (t.at(a.0, a.1).unwrap(), t.at(b.0, b.1).unwrap());
+                let line = t.line(a, b);
+                assert_eq!(line.first(), Some(&a));
+                assert_eq!(line.last(), Some(&b));
+                assert_eq!(line.len() as u32, t.distance(a, b) + 1);
+                for pair in line.windows(2) {
+                    assert_eq!(t.distance(pair[0], pair[1]), 1, "{wrap:?}: consecutive hexes are adjacent");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn within_radius() {
+        let t = Topology::new(20, 20, Wrap::None);
+        let c = t.at(10, 10).unwrap();
+        assert_eq!(t.within(c, 0), vec![c]);
+        assert_eq!(t.within(c, 1).len(), 7);
+        assert_eq!(t.within(c, 3).len(), 37);
+        assert!(t.within(c, 3).iter().all(|&h| t.distance(c, h) <= 3));
+        assert_eq!(t.within(t.at(0, 0).unwrap(), 1).len(), 3, "clipped at the corner");
+        let small = Topology::new(4, 4, Wrap::X);
+        let all = small.within(small.at(0, 2).unwrap(), 10);
+        assert_eq!(all.len(), small.len(), "no duplicates when wrapping round");
     }
 
     #[test]

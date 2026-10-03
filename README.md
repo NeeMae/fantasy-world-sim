@@ -6,7 +6,7 @@ and can optionally step in as a god or take the throne of a realm.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the design and roadmap.
 
-**Status:** Phase 0 (skeleton). Worlds generate and render; nothing lives in them yet.
+**Status:** Phase 0.5. Worlds generate, render and can be reshaped by hand; nothing lives in them yet.
 
 ## Running
 
@@ -15,14 +15,24 @@ Requires a recent stable Rust toolchain. On Linux, Bevy also needs
 
 ```sh
 # Desktop app (run from the repository root so it finds packs/base)
-cargo run --release -p app -- --seed 42
+cargo run --release -p app -- --seed 42 --size medium
 
 # Headless: generate, simulate 100 years, export the map as a PNG
 cargo run --release -p sim-cli -- --seed 42 --years 100 --png world.png
 ```
 
-App controls: right-drag or WASD to pan, scroll to zoom, left-click to
-inspect a hex, Space to pause/resume, 1–5 for speed.
+App controls:
+
+| Input | Action |
+|---|---|
+| Right- or middle-drag, WASD | Pan |
+| Mouse wheel | Zoom towards the cursor |
+| Left click | Use the current tool |
+| I / B | Inspect tool / Paint (terrain brush) tool |
+| [ / ] | Shrink / grow the brush |
+| Space, 1–5 | Pause/resume, speed |
+
+The World panel regenerates the map from a seed and size preset.
 
 ## Layout
 

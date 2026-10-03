@@ -9,7 +9,7 @@
 
 use content::{Registry, Rgb};
 use rayon::prelude::*;
-use sim_core::{Axial, HexId, Topology, World, Wrap};
+use sim_core::{HexId, Topology, World, Wrap, round_axial};
 
 const SQRT3: f32 = 1.732_050_8;
 
@@ -52,21 +52,8 @@ impl HexLayout {
         let (x, y) = (x - s, y - s * SQRT3 / 2.0);
         let q = (2.0 / 3.0 * x) / s;
         let r = (-1.0 / 3.0 * x + SQRT3 / 3.0 * y) / s;
-        topo.at_axial(round_axial(q, r))
+        topo.at_axial(round_axial(q as f64, r as f64))
     }
-}
-
-/// Rounds fractional axial coordinates to the containing hex.
-fn round_axial(q: f32, r: f32) -> Axial {
-    let s = -q - r;
-    let (mut rq, mut rr, rs) = (q.round(), r.round(), s.round());
-    let (dq, dr, ds) = ((rq - q).abs(), (rr - r).abs(), (rs - s).abs());
-    if dq > dr && dq > ds {
-        rq = -rr - rs;
-    } else if dr > ds {
-        rr = -rq - rs;
-    }
-    Axial::new(rq as i32, rr as i32)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -92,41 +79,63 @@ pub struct Image {
 
 const NONE: u32 = u32::MAX;
 
-pub fn render(world: &World, registry: &Registry, opts: &RenderOptions) -> Image {
-    let topo = &world.topology;
-    let (width, height) = opts.layout.image_size(topo);
-    let (w, h) = (width as usize, height as usize);
+/// A rectangle of pixels in map-image coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
 
-    // Pass 1: which hex owns each pixel.
-    let owner: Vec<u32> = (0..w * h)
+/// Renders the whole map.
+pub fn render(world: &World, registry: &Registry, opts: &RenderOptions) -> Image {
+    let (width, height) = opts.layout.image_size(&world.topology);
+    let rgba = render_rect(world, registry, opts, PixelRect { x: 0, y: 0, width, height });
+    Image { width, height, rgba }
+}
+
+/// Renders one rectangle of the map as RGBA8, row-major. Pixels outside the
+/// map get the background colour. Rendering a rectangle gives exactly the
+/// same pixels as the same area of a full [`render`].
+pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rect: PixelRect) -> Vec<u8> {
+    let topo = &world.topology;
+    let (map_w, _) = opts.layout.image_size(topo);
+    let wraps = topo.wrap() == Wrap::X;
+
+    // Pass 1: which hex owns each pixel, with a 1px margin so edge effects
+    // (coastlines) match across rectangle boundaries.
+    let (ow, oh) = (rect.width as usize + 2, rect.height as usize + 2);
+    let (ox, oy) = (rect.x as isize - 1, rect.y as isize - 1);
+    let owner: Vec<u32> = (0..ow * oh)
         .into_par_iter()
         .map(|i| {
-            let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
-            opts.layout.hex_at(topo, x, y).map_or(NONE, |id| id.0)
+            let mut x = ox + (i % ow) as isize;
+            let y = oy + (i / ow) as isize;
+            if wraps {
+                x = x.rem_euclid(map_w as isize);
+            }
+            opts.layout.hex_at(topo, x as f32 + 0.5, y as f32 + 0.5).map_or(NONE, |id| id.0)
         })
         .collect();
-
-    let wraps = topo.wrap() == Wrap::X;
-    let owner_at = |x: isize, y: isize| -> u32 {
-        if y < 0 || y >= h as isize {
-            return NONE;
-        }
-        let x = if wraps { x.rem_euclid(w as isize) } else { x };
-        if x < 0 || x >= w as isize { NONE } else { owner[y as usize * w + x as usize] }
-    };
     let is_water = |id: u32| id != NONE && registry.biome(world.terrain.biome[id as usize]).water;
 
     // Pass 2: colour.
+    let (w, h) = (rect.width as usize, rect.height as usize);
     let mut rgba = vec![0u8; w * h * 4];
-    rgba.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
-            let id = owner[y * w + x];
-            let px = &mut row[x * 4..x * 4 + 4];
+    if w == 0 {
+        return rgba;
+    }
+    rgba.par_chunks_mut(w * 4).enumerate().for_each(|(ry, row)| {
+        for rx in 0..w {
+            let (lx, ly) = (rx + 1, ry + 1); // position in `owner`
+            let id = owner[ly * ow + lx];
+            let px = &mut row[rx * 4..rx * 4 + 4];
             if id == NONE {
                 px.copy_from_slice(&[opts.background.0, opts.background.1, opts.background.2, 255]);
                 continue;
             }
-            let (xi, yi) = (x as isize, y as isize);
+            let (x, y) = (rect.x as usize + rx, rect.y as usize + ry);
             let biome = registry.biome(world.terrain.biome[id as usize]);
             let elevation = world.terrain.elevation[id as usize];
 
@@ -138,11 +147,11 @@ pub fn render(world: &World, registry: &Registry, opts: &RenderOptions) -> Image
                 shade *= 0.88 + elevation * 0.24;
             }
 
-            let neighbours = [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dy)| owner_at(xi + dx, yi + dy));
-            let here_water = biome.water;
-            if neighbours.iter().any(|&n| n != NONE && is_water(n) != here_water) {
+            let neighbours =
+                [(lx + 1, ly), (lx - 1, ly), (lx, ly + 1), (lx, ly - 1)].map(|(nx, ny)| owner[ny * ow + nx]);
+            if neighbours.iter().any(|&n| n != NONE && is_water(n) != biome.water) {
                 // Coastline: dark edge on land, pale surf on water.
-                shade = if here_water { 1.35 } else { 0.62 };
+                shade = if biome.water { 1.35 } else { 0.62 };
             } else if opts.grid && neighbours.iter().any(|&n| n != NONE && n != id) {
                 shade *= 0.85;
             }
@@ -151,8 +160,75 @@ pub fn render(world: &World, registry: &Registry, opts: &RenderOptions) -> Image
             px.copy_from_slice(&[c.0, c.1, c.2, 255]);
         }
     });
+    rgba
+}
 
-    Image { width, height, rgba }
+/// The pixel rectangle covering `hexes`, clamped to the map image (with a
+/// little margin for edge effects that reach into neighbouring pixels).
+pub fn hexes_bounds(topo: &Topology, layout: &HexLayout, hexes: &[HexId]) -> Option<PixelRect> {
+    let (map_w, map_h) = layout.image_size(topo);
+    let reach = layout.size + 2.0;
+    let mut bounds: Option<(f32, f32, f32, f32)> = None;
+    for &hex in hexes {
+        let (x, y) = layout.center(topo, hex);
+        let b = bounds.get_or_insert((x, y, x, y));
+        *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+    }
+    let (x0, y0, x1, y1) = bounds?;
+    let x0 = (x0 - reach).floor().max(0.0) as u32;
+    let y0 = (y0 - reach).floor().max(0.0) as u32;
+    let x1 = ((x1 + reach).ceil() as u32).min(map_w);
+    let y1 = ((y1 + reach).ceil() as u32).min(map_h);
+    Some(PixelRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) })
+}
+
+/// A transparent RGBA8 overlay tracing the outer edge of a set of hexes,
+/// positioned at `rect` in map-image coordinates.
+pub struct Outline {
+    pub rect: PixelRect,
+    pub rgba: Vec<u8>,
+}
+
+/// Traces the boundary of `hexes` with a line `thickness` pixels wide, drawn
+/// just inside the hexes' pixels so it lines up exactly with the map.
+pub fn outline(
+    topo: &Topology,
+    layout: &HexLayout,
+    hexes: &[HexId],
+    thickness: u32,
+    color: [u8; 4],
+) -> Option<Outline> {
+    let rect = hexes_bounds(topo, layout, hexes)?;
+    let (w, h) = (rect.width as usize, rect.height as usize);
+    let mut member = vec![false; topo.len()];
+    for &hex in hexes {
+        member[hex.index()] = true;
+    }
+    let inside: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let (x, y) = ((rect.x as usize + i % w) as f32 + 0.5, (rect.y as usize + i / w) as f32 + 0.5);
+            layout.hex_at(topo, x, y).is_some_and(|id| member[id.index()])
+        })
+        .collect();
+    let t = thickness.max(1) as isize;
+    let is_inside = |x: isize, y: isize| {
+        x >= 0 && y >= 0 && x < w as isize && y < h as isize && inside[y as usize * w + x as usize]
+    };
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            if !is_inside(x, y) {
+                continue;
+            }
+            let edge = (-t..=t)
+                .any(|dy| (-t..=t).any(|dx| (dx.abs() + dy.abs() <= t) && !is_inside(x + dx, y + dy)));
+            if edge {
+                let i = (y as usize * w + x as usize) * 4;
+                rgba[i..i + 4].copy_from_slice(&color);
+            }
+        }
+    }
+    Some(Outline { rect, rgba })
 }
 
 /// 4×4 Bayer matrix, normalised to `0.0..1.0`.
@@ -196,6 +272,51 @@ mod tests {
         }
         assert!(seen.iter().all(|&s| s));
         assert_eq!(layout.hex_at(&topo, -10.0, -10.0), None);
+    }
+
+    #[test]
+    fn rect_render_matches_full_render() {
+        let registry = content::load_str(
+            r##"(biomes: [(id: "sea", water: true, color: "#0000ff"), (id: "land", color: "#00ff00")])"##,
+        )
+        .unwrap();
+        let topo = Topology::new(24, 16, Wrap::None);
+        let mut terrain = sim_core::Terrain::new(topo.len());
+        for (i, b) in terrain.biome.iter_mut().enumerate() {
+            *b = content::BiomeId(((i * 7) % 3 == 0) as u16);
+        }
+        let world = World::new(1, topo, terrain);
+        let opts = RenderOptions::default();
+        let full = render(&world, &registry, &opts);
+        let rect = PixelRect { x: 17, y: 9, width: 40, height: 23 };
+        let part = render_rect(&world, &registry, &opts, rect);
+        for y in 0..rect.height as usize {
+            let fy = rect.y as usize + y;
+            let full_row =
+                &full.rgba[(fy * full.width as usize + rect.x as usize) * 4..][..rect.width as usize * 4];
+            assert_eq!(&part[y * rect.width as usize * 4..][..rect.width as usize * 4], full_row);
+        }
+    }
+
+    #[test]
+    fn outline_traces_only_the_selected_hex() {
+        let topo = Topology::new(10, 10, Wrap::None);
+        let layout = HexLayout { size: 6.0 };
+        let hex = topo.at(4, 4).unwrap();
+        let o = outline(&topo, &layout, &[hex], 1, [255, 255, 0, 255]).unwrap();
+        let mut drawn = 0;
+        for i in 0..(o.rect.width * o.rect.height) as usize {
+            if o.rgba[i * 4 + 3] != 0 {
+                drawn += 1;
+                let x = (o.rect.x + i as u32 % o.rect.width) as f32 + 0.5;
+                let y = (o.rect.y + i as u32 / o.rect.width) as f32 + 0.5;
+                assert_eq!(layout.hex_at(&topo, x, y), Some(hex));
+            }
+        }
+        assert!(drawn > 20, "an outline was drawn ({drawn} px)");
+        let (cx, cy) = layout.center(&topo, hex);
+        let (lx, ly) = (cx as u32 - o.rect.x, cy as u32 - o.rect.y);
+        assert_eq!(o.rgba[((ly * o.rect.width + lx) * 4 + 3) as usize], 0, "the middle is see-through");
     }
 
     #[test]

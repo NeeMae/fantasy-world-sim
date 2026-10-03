@@ -1,10 +1,15 @@
 //! Desktop viewer: generates a world, runs it on a background thread and
 //! draws it as a pixel-art map.
 
+// Bevy systems declare everything they touch as parameters.
+#![allow(clippy::too_many_arguments)]
+
 mod camera;
 mod map_view;
 mod sim_thread;
+mod tools;
 mod ui;
+mod world_setup;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,22 +18,19 @@ use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
-use sim_core::{Simulation, Wrap};
-use worldgen::WorldGenParams;
 
-use map_view::Selection;
-use sim_thread::SimThread;
+use tools::{Hover, PointerOverUi, Selection, ToolState};
+use world_setup::{Content, RegenerateRequest, SIZES, WorldSettings};
 
-#[derive(Parser, Resource, Clone)]
+#[derive(Parser)]
 #[command(version, about = "Fantasy world simulator")]
 struct Args {
     /// World seed (random if omitted).
     #[arg(long)]
     seed: Option<u64>,
-    #[arg(long, default_value_t = 512)]
-    width: u32,
-    #[arg(long, default_value_t = 320)]
-    height: u32,
+    /// Map size preset: small, medium, large or huge.
+    #[arg(long, default_value = "medium")]
+    size: String,
     /// Content packs, loaded in order. Later packs override earlier ones.
     #[arg(long = "pack", default_value = "packs/base")]
     packs: Vec<PathBuf>,
@@ -36,6 +38,20 @@ struct Args {
 
 fn main() -> AppExit {
     let args = Args::parse();
+    let registry = match content::load_packs(&args.packs) {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            eprintln!("error: failed to load content: {e}");
+            return AppExit::error();
+        }
+    };
+    let Some(size) = SIZES.iter().position(|(name, ..)| name.eq_ignore_ascii_case(&args.size)) else {
+        eprintln!("error: unknown size {:?}; expected small, medium, large or huge", args.size);
+        return AppExit::error();
+    };
+    let settings =
+        WorldSettings { seed: args.seed.unwrap_or_else(world_setup::random_seed).to_string(), size };
+
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()).set(WindowPlugin {
             primary_window: Some(Window {
@@ -47,12 +63,25 @@ fn main() -> AppExit {
         }))
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb_u8(12, 14, 22)))
-        .insert_resource(args)
+        .insert_resource(Content(registry))
+        .insert_resource(settings)
         .init_resource::<Selection>()
+        .init_resource::<Hover>()
+        .init_resource::<ToolState>()
+        .init_resource::<PointerOverUi>()
+        .add_message::<RegenerateRequest>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            ((camera::controls, ui::hotkeys, ui::pick), (map_view::redraw, map_view::update_marker)).chain(),
+            (
+                world_setup::regenerate,
+                (camera::controls, ui::hotkeys),
+                tools::update_hover,
+                tools::use_tool,
+                map_view::redraw_changes,
+                map_view::update_outlines,
+            )
+                .chain(),
         )
         .add_systems(EguiPrimaryContextPass, ui::panels)
         .run()
@@ -61,42 +90,19 @@ fn main() -> AppExit {
 fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    args: Res<Args>,
+    content: Res<Content>,
+    settings: Res<WorldSettings>,
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let registry = match content::load_packs(&args.packs) {
-        Ok(r) => Arc::new(r),
-        Err(e) => {
-            error!("failed to load content: {e}");
-            exit.write(AppExit::error());
-            return;
+    match world_setup::start_world(&mut commands, &mut images, &content, &settings) {
+        Ok(map_size) => {
+            let window = windows.single().map_or(Vec2::new(1600.0, 900.0), Window::size);
+            camera::spawn(&mut commands, map_size, window);
         }
-    };
-    let params = WorldGenParams {
-        seed: args.seed.unwrap_or_else(rand_seed),
-        width: args.width,
-        height: args.height,
-        wrap: Wrap::None,
-        ..default()
-    };
-    let world = match worldgen::generate(&params, &registry) {
-        Ok(w) => w,
         Err(e) => {
             error!("world generation failed: {e}");
             exit.write(AppExit::error());
-            return;
         }
-    };
-    info!("generated world with seed {}", params.seed);
-
-    let map_size = map_view::spawn(&mut commands, &mut images, registry.clone(), &world);
-    let window_size = windows.single().map_or(Vec2::new(1600.0, 900.0), Window::size);
-    camera::spawn(&mut commands, map_size, window_size);
-    commands.insert_resource(SimThread::spawn(Simulation::new(world, registry)));
-}
-
-/// A seed from the clock, for when the user doesn't ask for one.
-fn rand_seed() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+    }
 }

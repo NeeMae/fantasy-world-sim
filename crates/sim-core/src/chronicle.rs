@@ -7,8 +7,8 @@ use crate::HexId;
 /// filtered into timelines, or exported as lore.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EventKind {
-    /// The land at a hex was remade by an outside power.
-    TerrainReshaped { hex: HexId, from: BiomeId, to: BiomeId },
+    /// The land around a hex was remade by an outside power.
+    TerrainReshaped { center: HexId, radius: u32, to: BiomeId, hexes_changed: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

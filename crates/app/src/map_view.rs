@@ -1,4 +1,5 @@
-//! Draws the world as one pixel-art texture and maps the cursor back to hexes.
+//! Draws the world as a grid of pixel-art texture chunks, redraws only the
+//! chunks whose hexes change, and overlays hex outlines for hover/selection.
 
 use std::sync::Arc;
 
@@ -6,43 +7,62 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use content::Registry;
-use map_raster::RenderOptions;
+use map_raster::{PixelRect, RenderOptions};
 use sim_core::{HexId, World};
 
 use crate::sim_thread::SimThread;
+use crate::tools::{Hover, Selection, ToolState};
+
+/// Chunk edge in pixels. Small enough that redrawing one is cheap and that
+/// huge maps stay under GPU texture size limits.
+const CHUNK: u32 = 512;
+
+/// Everything belonging to the current world, despawned on regenerate.
+#[derive(Component)]
+pub struct MapEntity;
+
+struct Chunk {
+    rect: PixelRect,
+    image: Handle<Image>,
+}
 
 #[derive(Resource)]
 pub struct MapView {
     pub registry: Arc<Registry>,
     pub options: RenderOptions,
-    image: Handle<Image>,
-    drawn_revision: Option<u64>,
-    /// Image size in pixels; the sprite is centred on the origin.
+    chunks: Vec<Chunk>,
+    /// Image size in pixels; the map is centred on the world origin.
     pub size: Vec2,
 }
 
 impl MapView {
-    /// Converts a world-space position to the hex under it.
+    /// The hex under a world-space position.
     pub fn hex_at(&self, world: &World, pos: Vec2) -> Option<HexId> {
-        let px = pos.x + self.size.x / 2.0;
-        let py = self.size.y / 2.0 - pos.y;
+        let (px, py) = self.to_pixels(pos);
         self.options.layout.hex_at(&world.topology, px, py)
     }
 
-    /// World-space centre of a hex.
-    pub fn hex_center(&self, world: &World, hex: HexId) -> Vec2 {
-        let (x, y) = self.options.layout.center(&world.topology, hex);
-        Vec2::new(x - self.size.x / 2.0, self.size.y / 2.0 - y)
+    fn to_pixels(&self, pos: Vec2) -> (f32, f32) {
+        (pos.x + self.size.x / 2.0, self.size.y / 2.0 - pos.y)
+    }
+
+    /// World-space centre of a pixel rectangle.
+    fn rect_center(&self, r: PixelRect) -> Vec2 {
+        Vec2::new(
+            r.x as f32 + r.width as f32 / 2.0 - self.size.x / 2.0,
+            self.size.y / 2.0 - (r.y as f32 + r.height as f32 / 2.0),
+        )
+    }
+
+    fn redraw_chunk(&self, chunk: &Chunk, world: &World, images: &mut Assets<Image>) {
+        let rgba = map_raster::render_rect(world, &self.registry, &self.options, chunk.rect);
+        if let Some(mut image) = images.get_mut(&chunk.image) {
+            image.data = Some(rgba);
+        }
     }
 }
 
-#[derive(Resource, Default)]
-pub struct Selection(pub Option<HexId>);
-
-#[derive(Component)]
-pub struct SelectionMarker;
-
-/// Spawns the map sprite and selection marker; returns the map's size in pixels.
+/// Spawns the map for `world`; returns its size in pixels.
 pub fn spawn(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -51,60 +71,143 @@ pub fn spawn(
 ) -> Vec2 {
     let options = RenderOptions::default();
     let (w, h) = options.layout.image_size(&world.topology);
-    let image = images.add(blank_image(w, h));
-    commands.spawn((Sprite::from_image(image.clone()), Transform::default()));
-    commands.spawn((
-        Sprite::from_color(Color::srgba(1.0, 0.9, 0.3, 0.55), Vec2::splat(options.layout.size * 1.6)),
-        Transform::from_xyz(0.0, 0.0, 1.0),
-        Visibility::Hidden,
-        SelectionMarker,
-    ));
     let size = Vec2::new(w as f32, h as f32);
-    commands.insert_resource(MapView { registry, options, image, drawn_revision: None, size });
+    let mut view = MapView { registry, options, chunks: Vec::new(), size };
+
+    for cy in (0..h).step_by(CHUNK as usize) {
+        for cx in (0..w).step_by(CHUNK as usize) {
+            let rect = PixelRect { x: cx, y: cy, width: CHUNK.min(w - cx), height: CHUNK.min(h - cy) };
+            let rgba = map_raster::render_rect(world, &view.registry, &view.options, rect);
+            let image = images.add(make_image(rect.width, rect.height, rgba));
+            commands.spawn((
+                Sprite::from_image(image.clone()),
+                Transform::from_translation(view.rect_center(rect).extend(0.0)),
+                MapEntity,
+            ));
+            view.chunks.push(Chunk { rect, image });
+        }
+    }
+
+    for kind in [OutlineKind::Hover, OutlineKind::Selection] {
+        commands.spawn((
+            Sprite::default(),
+            Transform::from_xyz(0.0, 0.0, kind.z()),
+            Visibility::Hidden,
+            Outline { kind, key: None },
+            MapEntity,
+        ));
+    }
+    commands.insert_resource(view);
     size
 }
 
-fn blank_image(width: u32, height: u32) -> Image {
-    Image::new_fill(
-        Extent3d { width, height, depth_or_array_layers: 1 },
+fn make_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
+    Image::new(
+        Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
         TextureDimension::D2,
-        &[0, 0, 0, 255],
+        if rgba.is_empty() { vec![0; 4] } else { rgba },
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     )
 }
 
-/// Re-rasterises the map whenever the simulation reports changed terrain.
-pub fn redraw(sim: Res<SimThread>, mut view: ResMut<MapView>, mut images: ResMut<Assets<Image>>) {
-    let snap = sim.snapshot();
-    if view.drawn_revision == Some(snap.world.terrain_revision) {
+/// Redraws the chunks covering hexes the simulation changed.
+pub fn redraw_changes(sim: Res<SimThread>, view: Res<MapView>, mut images: ResMut<Assets<Image>>) {
+    let changed = sim.take_changed_hexes();
+    if changed.is_empty() {
         return;
     }
-    let raster = map_raster::render(&snap.world, &view.registry, &view.options);
-    if let Some(mut image) = images.get_mut(&view.image) {
-        image.data = Some(raster.rgba);
+    let world = sim.snapshot().world;
+    let Some(dirty) = map_raster::hexes_bounds(&world.topology, &view.options.layout, &changed) else {
+        return;
+    };
+    for chunk in &view.chunks {
+        if overlaps(chunk.rect, dirty) {
+            view.redraw_chunk(chunk, &world, &mut images);
+        }
     }
-    view.drawn_revision = Some(snap.world.terrain_revision);
 }
 
-/// Keeps the selection marker on the selected hex, at a constant on-screen size.
-pub fn update_marker(
+fn overlaps(a: PixelRect, b: PixelRect) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutlineKind {
+    Hover,
+    Selection,
+}
+
+impl OutlineKind {
+    fn z(self) -> f32 {
+        match self {
+            OutlineKind::Hover => 1.0,
+            OutlineKind::Selection => 2.0,
+        }
+    }
+
+    fn color(self) -> [u8; 4] {
+        match self {
+            OutlineKind::Hover => [255, 255, 255, 200],
+            OutlineKind::Selection => [255, 214, 64, 255],
+        }
+    }
+}
+
+/// An outline overlay, rebuilt only when what it traces changes.
+#[derive(Component)]
+pub struct Outline {
+    kind: OutlineKind,
+    /// The hexes and line thickness currently drawn.
+    key: Option<(Vec<HexId>, u32)>,
+}
+
+/// Keeps the hover and selection outlines tracing the right hexes, with a
+/// line thick enough to see at the current zoom.
+pub fn update_outlines(
+    hover: Res<Hover>,
     selection: Res<Selection>,
+    tools: Res<ToolState>,
     sim: Res<SimThread>,
     view: Res<MapView>,
     camera: Query<&Projection, With<Camera>>,
-    mut marker: Query<(&mut Transform, &mut Visibility), With<SelectionMarker>>,
+    mut images: ResMut<Assets<Image>>,
+    mut outlines: Query<(&mut Outline, &mut Sprite, &mut Transform, &mut Visibility)>,
 ) {
-    let Ok((mut transform, mut visibility)) = marker.single_mut() else { return };
-    match selection.0 {
-        Some(hex) => {
-            let c = view.hex_center(&sim.snapshot().world, hex);
-            transform.translation = c.extend(1.0);
-            if let Ok(Projection::Orthographic(ortho)) = camera.single() {
-                transform.scale = Vec3::splat(ortho.scale.max(1.0));
-            }
-            *visibility = Visibility::Visible;
+    let zoom = match camera.single() {
+        Ok(Projection::Orthographic(o)) => o.scale,
+        _ => 1.0,
+    };
+    let thickness = (zoom.ceil() as u32).clamp(1, 4);
+    let world = sim.snapshot().world;
+
+    for (mut outline, mut sprite, mut transform, mut visibility) in &mut outlines {
+        let hexes = match outline.kind {
+            OutlineKind::Hover => hover.0.map(|h| tools.affected_hexes(&world, h)).unwrap_or_default(),
+            OutlineKind::Selection => selection.0.into_iter().collect(),
+        };
+        if hexes.is_empty() {
+            *visibility = Visibility::Hidden;
+            outline.key = None;
+            continue;
         }
-        None => *visibility = Visibility::Hidden,
+        let key = (hexes, thickness);
+        if outline.key.as_ref() == Some(&key) {
+            continue;
+        }
+        let Some(drawn) = map_raster::outline(
+            &world.topology,
+            &view.options.layout,
+            &key.0,
+            thickness,
+            outline.kind.color(),
+        ) else {
+            continue;
+        };
+        // Replacing the handle frees the previous outline image.
+        sprite.image = images.add(make_image(drawn.rect.width, drawn.rect.height, drawn.rgba));
+        transform.translation = view.rect_center(drawn.rect).extend(outline.kind.z());
+        *visibility = Visibility::Visible;
+        outline.key = Some(key);
     }
 }
