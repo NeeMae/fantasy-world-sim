@@ -1,0 +1,100 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build every platform and publish a GitHub
+# release with ready-to-run zips. Running it by hand (Actions tab → Release →
+# Run workflow) builds the zips as downloadable artifacts without releasing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          # Older Ubuntu, so the binary runs on more Linux distributions.
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+          # One download for both Apple Silicon and Intel Macs.
+          - name: macos-universal
+            os: macos-14
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bevy system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Build
+        shell: bash
+        run: |
+          for target in ${TARGETS//,/ }; do
+            cargo build --release --locked -p app -p sim-cli --target "$target"
+          done
+        env:
+          TARGETS: ${{ matrix.targets }}
+
+      - name: Package
+        shell: bash
+        run: |
+          out="fantasy-world-sim-${{ matrix.name }}"
+          mkdir -p "$out"
+          case "${{ matrix.name }}" in
+            windows-*)
+              cp target/x86_64-pc-windows-msvc/release/fantasy-world-sim.exe "$out/"
+              cp target/x86_64-pc-windows-msvc/release/sim-cli.exe "$out/" ;;
+            linux-*)
+              cp target/x86_64-unknown-linux-gnu/release/fantasy-world-sim "$out/"
+              cp target/x86_64-unknown-linux-gnu/release/sim-cli "$out/" ;;
+            macos-*)
+              for bin in fantasy-world-sim sim-cli; do
+                lipo -create -output "$out/$bin" \
+                  "target/aarch64-apple-darwin/release/$bin" \
+                  "target/x86_64-apple-darwin/release/$bin"
+              done ;;
+          esac
+          cp -r packs "$out/"
+          cp README.md dist/PLAYING.txt "$out/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "$out.zip" "$out" > /dev/null
+          else
+            zip -qr "$out.zip" "$out"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fantasy-world-sim-${{ matrix.name }}
+          path: fantasy-world-sim-${{ matrix.name }}.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          prerelease: true
+          generate_release_notes: true

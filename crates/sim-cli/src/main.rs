@@ -48,7 +48,8 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     years: u64,
     /// Content packs, loaded in order. Later packs override earlier ones.
-    #[arg(long = "pack", default_value = "packs/base")]
+    /// (Default: the base pack, found in ./packs/base or next to the program.)
+    #[arg(long = "pack")]
     packs: Vec<PathBuf>,
     /// Write a pixel-art image of the final map.
     #[arg(long)]
@@ -103,7 +104,11 @@ enum Shape {
 }
 
 fn main() -> ExitCode {
-    match run(Args::parse()) {
+    let mut args = Args::parse();
+    if args.packs.is_empty() {
+        args.packs.push(content::default_base_pack());
+    }
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");

@@ -1,0 +1,32 @@
+Fantasy World Sim — test build
+==============================
+
+Start it
+--------
+Windows:  double-click fantasy-world-sim.exe
+          (If SmartScreen warns "unrecognized app": More info -> Run anyway.
+          The build isn't code-signed.)
+macOS:    right-click fantasy-world-sim -> Open -> Open
+          (Needed the first time only, because the build isn't signed.
+          If macOS still refuses, run in Terminal, inside this folder:
+            xattr -dr com.apple.quarantine .
+          then try again.)
+Linux:    ./fantasy-world-sim
+
+Keep the "packs" folder next to the program: it holds the game's content.
+
+Controls
+--------
+  Right- or middle-drag, WASD   pan
+  Mouse wheel                   zoom
+  Left click                    use tool (inspect, or paint)
+  I / B                         inspect tool / paint tool
+  [ / ]                         brush size
+  Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y undo / redo
+  M                             cycle map views
+  Space, 1-5                    pause, speed
+
+The World panel on the right generates new worlds: try World size,
+Continents, Wrap and Climate, then "Regenerate world".
+
+Found a bug? Note the seed (shown in the World panel) and what you did.

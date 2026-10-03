@@ -58,6 +58,21 @@ struct RawKind {
     defs: HashMap<String, RawDef>,
 }
 
+/// Where the base pack is: `packs/base` in the working directory (running
+/// from a source checkout) or next to the executable (a release download,
+/// launched by double-clicking from anywhere).
+pub fn default_base_pack() -> PathBuf {
+    let relative = Path::new("packs").join("base");
+    if relative.join("pack.ron").exists() {
+        return relative;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&relative)))
+        .filter(|p| p.join("pack.ron").exists())
+        .unwrap_or(relative)
+}
+
 /// Loads `packs` in order (later packs override earlier ones) into a [`Registry`].
 pub fn load_packs<P: AsRef<Path>>(packs: &[P]) -> Result<Registry, ContentError> {
     let mut kinds: HashMap<&'static str, RawKind> = HashMap::new();

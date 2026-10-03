@@ -1,6 +1,8 @@
 //! Desktop viewer: generates a world, runs it on a background thread and
 //! draws it as a pixel-art map.
 
+// Release builds on Windows are a windowed app, without a console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 // Bevy systems declare everything they touch as parameters.
 #![allow(clippy::too_many_arguments)]
 
@@ -41,12 +43,16 @@ struct Args {
     #[arg(long)]
     ocean_edges: bool,
     /// Content packs, loaded in order. Later packs override earlier ones.
-    #[arg(long = "pack", default_value = "packs/base")]
+    /// (Default: the base pack, found in ./packs/base or next to the program.)
+    #[arg(long = "pack")]
     packs: Vec<PathBuf>,
 }
 
 fn main() -> AppExit {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if args.packs.is_empty() {
+        args.packs.push(content::default_base_pack());
+    }
     let registry = match content::load_packs(&args.packs) {
         Ok(r) => Arc::new(r),
         Err(e) => {

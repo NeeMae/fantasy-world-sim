@@ -28,5 +28,5 @@ mod registry;
 
 pub use color::Rgb;
 pub use defs::{BiomeDef, Glyph, Range, ReliefDef, Site};
-pub use loader::{ContentError, PackManifest, load_packs, load_str};
+pub use loader::{ContentError, PackManifest, default_base_pack, load_packs, load_str};
 pub use registry::{BiomeId, Registry, ReliefId};
