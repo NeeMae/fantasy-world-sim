@@ -29,6 +29,9 @@ struct Args {
     /// Map shape.
     #[arg(long, value_enum, default_value_t = Shape::Flat)]
     shape: Shape,
+    /// What lies at the map's edges.
+    #[arg(long, value_enum, default_value_t = Edges::Open)]
+    edges: Edges,
     /// Ticks (months) to simulate. Added to `--years`.
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -47,6 +50,14 @@ struct Args {
     /// Draw hex outlines in `--png`.
     #[arg(long)]
     grid: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Edges {
+    /// Land and sea run off the edges, as if the map were part of a larger world.
+    Open,
+    /// The world is ringed by ocean.
+    Ocean,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -79,6 +90,10 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         wrap: match args.shape {
             Shape::Flat => Wrap::None,
             Shape::Cylinder => Wrap::X,
+        },
+        edges: match args.edges {
+            Edges::Open => worldgen::EdgeStyle::Open,
+            Edges::Ocean => worldgen::EdgeStyle::Ocean,
         },
         ..Default::default()
     };

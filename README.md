@@ -32,7 +32,10 @@ App controls:
 | [ / ] | Shrink / grow the brush |
 | Space, 1–5 | Pause/resume, speed |
 
-The World panel regenerates the map from a seed and size preset.
+The World panel regenerates the map from a seed, size preset and edge
+style: **Open** (the map is a window onto a larger world, so land runs off
+the edges) or **Ocean** (a self-contained world ringed by sea). On the
+command line, pass `--ocean-edges` to the app or `--edges ocean` to `sim-cli`.
 
 ## Layout
 

@@ -5,6 +5,7 @@ use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiContexts, egui};
 use content::BiomeId;
 use sim_core::Date;
+use worldgen::EdgeStyle;
 
 use crate::map_view::MapView;
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
@@ -102,6 +103,14 @@ fn world_section(
             for (i, (name, w, h)) in SIZES.iter().enumerate() {
                 ui.selectable_value(&mut settings.size, i, format!("{name} ({w}×{h})"));
             }
+        });
+        ui.end_row();
+        ui.label("Edges");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut settings.edges, EdgeStyle::Open, "Open")
+                .on_hover_text("Land runs off the map, as if it were part of a larger world");
+            ui.selectable_value(&mut settings.edges, EdgeStyle::Ocean, "Ocean")
+                .on_hover_text("The world is ringed by sea");
         });
         ui.end_row();
     });

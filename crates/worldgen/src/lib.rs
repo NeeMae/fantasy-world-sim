@@ -14,19 +14,58 @@ use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 use sim_core::{Terrain, Topology, World, Wrap, rng};
 
+/// What happens at the map's edges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EdgeStyle {
+    /// The map is a window onto a larger world: land and sea run off the
+    /// edges wherever the terrain takes them.
+    #[default]
+    Open,
+    /// The world is ringed by ocean, for a self-contained island or
+    /// continent. The falloff is rounded and noisy so coasts don't trace the
+    /// map's rectangle.
+    Ocean,
+}
+
 #[derive(Clone, Debug)]
 pub struct WorldGenParams {
     pub seed: u64,
     pub width: u32,
     pub height: u32,
     pub wrap: Wrap,
+    pub edges: EdgeStyle,
     /// Size of landmasses: larger values give fewer, bigger continents.
     pub continent_scale: f64,
+    /// Which climate bands the map covers.
+    pub latitudes: Latitudes,
+}
+
+/// How the map maps onto the planet's climate bands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Latitudes {
+    /// Warmth changes steadily from `north` to `south` (0 = polar, 1 = equatorial).
+    Span { north: f64, south: f64 },
+    /// Pole to pole, with the equator across the middle.
+    Globe,
+}
+
+impl Default for Latitudes {
+    fn default() -> Self {
+        Latitudes::Span { north: 0.12, south: 0.88 }
+    }
 }
 
 impl Default for WorldGenParams {
     fn default() -> Self {
-        WorldGenParams { seed: 0, width: 512, height: 320, wrap: Wrap::None, continent_scale: 1.0 }
+        WorldGenParams {
+            seed: 0,
+            width: 512,
+            height: 320,
+            wrap: Wrap::None,
+            edges: EdgeStyle::Open,
+            continent_scale: 1.0,
+            latitudes: Latitudes::default(),
+        }
     }
 }
 
@@ -42,23 +81,41 @@ pub enum WorldGenError {
 
 /// Independent noise layers, each seeded from the world seed.
 struct Layers {
-    elevation: Fbm<Perlin>,
+    /// Broad shapes: where the continents and ocean basins are.
+    continents: Fbm<Perlin>,
+    /// Coastline wiggle, ridges and hills on top of the continents.
+    detail: Fbm<Perlin>,
+    /// Distorts the coordinates the elevation layers are sampled at, so
+    /// landmasses get swirled, irregular shapes rather than round blobs.
+    warp: Fbm<Perlin>,
     moisture: Fbm<Perlin>,
     /// Wobbles climate bands so they don't follow lines of latitude exactly.
     climate: Fbm<Perlin>,
+    continent_scale: f64,
 }
 
 impl Layers {
     fn new(seed: u64, continent_scale: f64) -> Self {
         let layer_seed = |layer| rng::mix(seed, 0, layer, rng::purpose::WORLDGEN) as u32;
         Layers {
-            elevation: Fbm::<Perlin>::new(layer_seed(0))
-                .set_octaves(6)
-                .set_frequency(1.6 / continent_scale)
-                .set_persistence(0.5),
+            continents: Fbm::<Perlin>::new(layer_seed(0))
+                .set_octaves(3)
+                .set_frequency(1.1 / continent_scale)
+                .set_persistence(0.45),
+            detail: Fbm::<Perlin>::new(layer_seed(3)).set_octaves(5).set_frequency(3.2).set_persistence(0.5),
+            warp: Fbm::<Perlin>::new(layer_seed(4)).set_octaves(3).set_frequency(1.4 / continent_scale),
             moisture: Fbm::<Perlin>::new(layer_seed(1)).set_octaves(4).set_frequency(2.2),
             climate: Fbm::<Perlin>::new(layer_seed(2)).set_octaves(3).set_frequency(3.0),
+            continent_scale,
         }
+    }
+
+    /// Raw elevation at `p`: domain-warped continents plus detail.
+    fn elevation(&self, p: [f64; 3]) -> f64 {
+        let strength = 0.25 * self.continent_scale;
+        let offset = |o: f64| self.warp.get([p[0] + o, p[1] - o, p[2] + o]) * strength;
+        let q = [p[0] + offset(10.0), p[1] + offset(20.0), p[2] + offset(30.0)];
+        self.continents.get(q) + self.detail.get(q) * 0.35
     }
 }
 
@@ -77,7 +134,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 
     let samples: Vec<(f32, f32, f32)> = (0..topology.len() as u32)
         .into_par_iter()
-        .map(|i| sample(&topology, &layers, sim_core::HexId(i)))
+        .map(|i| sample(&topology, &layers, params, sim_core::HexId(i)))
         .collect();
 
     let mut terrain = Terrain::new(topology.len());
@@ -104,7 +161,12 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 }
 
 /// Raw `(elevation, moisture, latitude warmth)` for one hex.
-fn sample(topology: &Topology, layers: &Layers, hex: sim_core::HexId) -> (f32, f32, f32) {
+fn sample(
+    topology: &Topology,
+    layers: &Layers,
+    params: &WorldGenParams,
+    hex: sim_core::HexId,
+) -> (f32, f32, f32) {
     let (col, row) = topology.offset(hex);
     let (w, h) = (topology.width() as f64, topology.height() as f64);
     // Hex centre in "rows" units: columns are 3/4 of a hex width apart and
@@ -126,18 +188,36 @@ fn sample(topology: &Topology, layers: &Layers, hex: sim_core::HexId) -> (f32, f
         }
     };
 
-    let mut elevation = layers.elevation.get(point(0.0));
-    // Push land away from the borders so a bounded map reads as a continent
-    // surrounded by sea. A wrapping map only has north and south edges.
-    let edge = match topology.wrap() {
-        Wrap::None => (u / span).min(1.0 - u / span).min(v).min(1.0 - v),
-        Wrap::X => v.min(1.0 - v),
-    };
-    elevation -= (1.0 - (edge / 0.18).min(1.0)).powi(2) * 1.6;
+    let mut elevation = layers.elevation(point(0.0));
+    if params.edges == EdgeStyle::Ocean {
+        // A gentle slope down from the middle across the whole map makes
+        // land more likely towards the centre without dictating where the
+        // coast goes, so the terrain still draws it (islands, bays, inland
+        // seas). A ring-shaped falloff instead makes every world the same
+        // rounded box. A thin band at the very border guarantees open sea all
+        // round. A wrapping map only has north and south edges.
+        let ny = 2.0 * v - 1.0;
+        let (r, border) = match topology.wrap() {
+            Wrap::None => {
+                let nx = 2.0 * u / span - 1.0;
+                ((nx * nx + ny * ny).sqrt() / std::f64::consts::SQRT_2, nx.abs().max(ny.abs()))
+            }
+            Wrap::X => (ny.abs(), ny.abs()),
+        };
+        elevation -= r * r * 1.4 + smoothstep(0.9, 0.98, border) * 2.0;
+    }
 
     let moisture = layers.moisture.get(point(100.0));
-    let latitude_warmth = 1.0 - (v - 0.5).abs() * 2.0 + layers.climate.get(point(200.0)) * 0.12;
+    let latitude_warmth = match params.latitudes {
+        Latitudes::Span { north, south } => north + (south - north) * v,
+        Latitudes::Globe => 1.0 - (v - 0.5).abs() * 2.0,
+    } + layers.climate.get(point(200.0)) * 0.12;
     (elevation as f32, moisture as f32, latitude_warmth as f32)
+}
+
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Replaces each value with its rank as a fraction in `0.0..=1.0`.
@@ -195,9 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn bounded_map_has_sea_borders_and_some_land() {
+    fn ocean_edges_ring_the_map_with_sea() {
         let reg = registry();
-        let w = generate(&params(3, Wrap::None), &reg).unwrap();
+        let w = generate(&WorldGenParams { edges: EdgeStyle::Ocean, ..params(3, Wrap::None) }, &reg).unwrap();
         let sea = reg.biome_id("sea").unwrap();
         let land = w.terrain.biome.iter().filter(|&&b| b != sea).count();
         assert!(land > 0 && land < w.terrain.len());
@@ -205,6 +285,22 @@ mod tests {
             let hex = w.topology.at(col, 0).unwrap();
             assert!(reg.biome(w.terrain.biome[hex.index()]).water, "top edge is sea");
         }
+    }
+
+    #[test]
+    fn open_edges_let_land_reach_the_border() {
+        let reg = registry();
+        let sea = reg.biome_id("sea").unwrap();
+        // Across a handful of seeds, land should touch the border somewhere.
+        let touches = (0..8).any(|seed| {
+            let w = generate(&params(seed, Wrap::None), &reg).unwrap();
+            let t = &w.topology;
+            let border = (0..64)
+                .flat_map(|c| [t.at(c, 0), t.at(c, 39)])
+                .chain((0..40).flat_map(|r| [t.at(0, r), t.at(63, r)]));
+            border.flatten().any(|h| w.terrain.biome[h.index()] != sea)
+        });
+        assert!(touches);
     }
 
     #[test]

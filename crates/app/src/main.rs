@@ -31,6 +31,9 @@ struct Args {
     /// Map size preset: small, medium, large or huge.
     #[arg(long, default_value = "medium")]
     size: String,
+    /// Ring the world with ocean instead of letting land run off the edges.
+    #[arg(long)]
+    ocean_edges: bool,
     /// Content packs, loaded in order. Later packs override earlier ones.
     #[arg(long = "pack", default_value = "packs/base")]
     packs: Vec<PathBuf>,
@@ -49,8 +52,11 @@ fn main() -> AppExit {
         eprintln!("error: unknown size {:?}; expected small, medium, large or huge", args.size);
         return AppExit::error();
     };
-    let settings =
-        WorldSettings { seed: args.seed.unwrap_or_else(world_setup::random_seed).to_string(), size };
+    let settings = WorldSettings {
+        seed: args.seed.unwrap_or_else(world_setup::random_seed).to_string(),
+        size,
+        edges: if args.ocean_edges { worldgen::EdgeStyle::Ocean } else { worldgen::EdgeStyle::Open },
+    };
 
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()).set(WindowPlugin {

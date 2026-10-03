@@ -84,6 +84,17 @@ factions, characters, armies) live in generational arenas (`slotmap`) and
 reference hexes/provinces by id. This is cache-friendly, rayon-friendly and
 trivially serialisable.
 
+### Generation
+
+- **Edges:** *Open* by default: the map is a window onto a larger world, so
+  land and sea run off every side. *Ocean* gives a self-contained world:
+  a gentle slope makes land likelier towards the middle without dictating
+  the coast, plus a thin guaranteed band of sea at the border.
+- **Shapes:** low-frequency continents plus detail, domain-warped so
+  coastlines swirl instead of forming round blobs.
+- **Climate:** a regional map runs from a cool north to a warm south by
+  default; a pole-to-pole globe is an option (for cylindrical worlds later).
+
 ## World model
 
 | Layer | Contents |

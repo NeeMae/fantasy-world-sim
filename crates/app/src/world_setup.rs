@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use content::Registry;
 use sim_core::{Simulation, Wrap};
-use worldgen::WorldGenParams;
+use worldgen::{EdgeStyle, WorldGenParams};
 
 use crate::camera::{self, MapCamera};
 use crate::map_view::{self, MapEntity};
@@ -26,6 +26,7 @@ pub struct WorldSettings {
     pub seed: String,
     /// Index into [`SIZES`].
     pub size: usize,
+    pub edges: EdgeStyle,
 }
 
 #[derive(Message)]
@@ -50,7 +51,7 @@ pub fn start_world(
     let seed =
         settings.seed.trim().parse::<u64>().map_err(|_| format!("invalid seed {:?}", settings.seed))?;
     let (_, width, height) = SIZES[settings.size];
-    let params = WorldGenParams { seed, width, height, wrap: Wrap::None, ..default() };
+    let params = WorldGenParams { seed, width, height, wrap: Wrap::None, edges: settings.edges, ..default() };
     let world = worldgen::generate(&params, &content.0).map_err(|e| e.to_string())?;
     info!("generated {width}×{height} world with seed {seed}");
     let size = map_view::spawn(commands, images, content.0.clone(), &world);
