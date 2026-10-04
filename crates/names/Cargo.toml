@@ -1,0 +1,16 @@
+[package]
+name = "names"
+description = "Generates names from a culture's language definition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+content.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+rand_chacha.workspace = true
+
+[lints]
+workspace = true

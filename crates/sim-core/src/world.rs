@@ -19,7 +19,19 @@ pub struct Terrain {
     pub biome: Vec<BiomeId>,
     /// Flat, hills, mountains, ...: layered on top of the biome.
     pub relief: Vec<ReliefId>,
+    /// The hex each hex's water drains into ([`NO_DRAIN`] for the sea or
+    /// off the map's edge).
+    pub drain: Vec<u32>,
+    /// Water flowing out of each hex: its catchment's rainfall × area.
+    /// At [`RIVER_DISCHARGE`] and above it's a river.
+    pub discharge: Vec<f32>,
 }
+
+/// [`Terrain::drain`] for water that leaves the land.
+pub const NO_DRAIN: u32 = u32::MAX;
+
+/// Discharge at which a stream counts as a river.
+pub const RIVER_DISCHARGE: f32 = 0.0025;
 
 impl Terrain {
     pub fn new(len: usize) -> Self {
@@ -31,7 +43,29 @@ impl Terrain {
             massif: vec![0.0; len],
             biome: vec![BiomeId::default(); len],
             relief: vec![ReliefId::default(); len],
+            drain: vec![NO_DRAIN; len],
+            discharge: vec![0.0; len],
         }
+    }
+
+    /// How well a hex feeds people, 0..=1: its biome's fertility, scaled by
+    /// relief, plus a bonus for river floodplains.
+    pub fn fertility(&self, registry: &content::Registry, i: usize) -> f32 {
+        let base = registry.biome(self.biome[i]).fertility * registry.relief(self.relief[i]).fertility;
+        let river = (self.river(i) / 4.0).min(1.0) * 0.25;
+        (base + if base > 0.0 { river } else { 0.0 }).clamp(0.0, 1.0)
+    }
+
+    /// How hard a hex is to cross, relative to open grassland (1).
+    pub fn travel_cost(&self, registry: &content::Registry, i: usize) -> f32 {
+        registry.biome(self.biome[i]).travel_cost * registry.relief(self.relief[i]).travel_cost
+    }
+
+    /// How big the river through a hex is: 0 for none, 1 at the threshold,
+    /// one more for each doubling of discharge beyond it.
+    pub fn river(&self, i: usize) -> f32 {
+        let q = self.discharge[i] / RIVER_DISCHARGE;
+        if q < 1.0 { 0.0 } else { 1.0 + q.log2() }
     }
 
     pub fn len(&self) -> usize {
@@ -63,6 +97,22 @@ pub struct Geology {
     pub stress: Vec<f32>,
 }
 
+/// World-wide rules chosen when the world is made. Part of the state, so
+/// they're covered by determinism.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldRules {
+    /// How turbulent history is, from 0 (calm: long-lived empires) to 1
+    /// (chaotic: constant upheaval). Will scale unrest, rebellion, AI
+    /// aggression, succession crises and catastrophes.
+    pub volatility: f32,
+}
+
+impl Default for WorldRules {
+    fn default() -> Self {
+        WorldRules { volatility: 0.5 }
+    }
+}
+
 /// The complete simulation state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct World {
@@ -71,6 +121,7 @@ pub struct World {
     pub topology: Topology,
     pub terrain: Terrain,
     pub geology: Geology,
+    pub rules: WorldRules,
     /// Incremented whenever terrain changes, so views know when to redraw
     /// the map instead of diffing it.
     pub terrain_revision: u64,
@@ -84,7 +135,7 @@ impl World {
             plate: vec![0; terrain.len()],
             stress: vec![0.0; terrain.len()],
         };
-        World { seed, tick: 0, topology, terrain, geology, terrain_revision: 0 }
+        World { seed, tick: 0, topology, terrain, geology, rules: WorldRules::default(), terrain_revision: 0 }
     }
 
     pub fn date(&self) -> Date {
@@ -101,14 +152,15 @@ impl World {
         h.u64(self.seed);
         h.u64(self.tick);
         h.u64(self.terrain_revision);
+        h.u64(self.rules.volatility.to_bits() as u64);
         let t = &self.terrain;
         for v in
             t.elevation.iter().chain(&t.moisture).chain(&t.temperature).chain(&t.ruggedness).chain(&t.massif)
         {
             h.u64(v.to_bits() as u64);
         }
-        for (b, r) in t.biome.iter().zip(&t.relief) {
-            h.u64(b.0 as u64 | (r.0 as u64) << 16);
+        for ((b, r), d) in t.biome.iter().zip(&t.relief).zip(&t.drain) {
+            h.u64(b.0 as u64 | (r.0 as u64) << 16 | (*d as u64) << 32);
         }
         let g = &self.geology;
         for (p, s) in g.plate.iter().zip(&g.stress) {

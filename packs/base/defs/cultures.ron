@@ -1,0 +1,85 @@
+// Cultures: each with its own language, so every people names its rivers,
+// towns and children in its own style.
+//
+// A language builds names from syllables. Each syllable follows one of the
+// `syllables` patterns: `C` is a consonant and `V` a vowel, so "CVC" gives
+// syllables like "dar" or "mek". Repeat an entry to make it more common.
+// Names containing a `forbidden` sequence are thrown away. People and
+// places can take endings (`person_endings`, `place_endings`), each with
+// `ending_chance`.
+//
+// `title_tiers` is what the culture calls its four ranks of title, from
+// the smallest to the greatest.
+(
+    cultures: [
+        (id: "aldmark", name: "Aldmark", race: "human",
+            description: "Hardy northern farmers and sea-raiders.",
+            language: (
+                consonants: ["b", "d", "f", "g", "h", "k", "l", "l", "m", "n", "r", "r", "s", "t", "th", "v", "w"],
+                vowels: ["a", "a", "e", "e", "i", "o", "u", "ae"],
+                syllables: ["CV", "CVC", "CVC", "VC"],
+                forbidden: ["wv", "vw", "hh", "aeu", "thh"],
+                person_endings: ["ric", "mund", "wyn", "helm", "gar", "a"],
+                place_endings: ["mark", "wick", "holt", "by", "stead", "ford", "dale"],
+                ending_chance: 0.6,
+            ),
+            title_tiers: ["Earldom", "Jarldom", "Kingdom", "High Kingdom"]),
+
+        (id: "sevran", name: "Sevran", race: "human",
+            description: "City-dwellers of the warm southern coasts.",
+            language: (
+                consonants: ["c", "l", "l", "m", "n", "n", "p", "r", "r", "s", "t", "v", "z"],
+                vowels: ["a", "a", "e", "i", "o", "o", "u", "ia", "io"],
+                syllables: ["CV", "CV", "CVC", "CVV"],
+                forbidden: ["ii", "uu", "iai", "oio"],
+                person_endings: ["o", "us", "a", "ian", "ella", "ius"],
+                place_endings: ["ona", "esa", "ium", "ara", "enza", "ano"],
+                ending_chance: 0.55,
+            ),
+            title_tiers: ["Barony", "March", "Republic", "Dominion"]),
+
+        (id: "ilvaren", name: "Ilvaren", race: "elf",
+            description: "The forest elves, singers of long songs.",
+            language: (
+                consonants: ["l", "l", "r", "n", "n", "s", "th", "v", "m", "f", "y"],
+                vowels: ["a", "a", "e", "e", "i", "i", "o", "ae", "ia"],
+                syllables: ["CV", "CV", "CV", "CVC", "V"],
+                max_syllables: 4,
+                forbidden: ["yi", "iy", "aeae", "eie", "thth"],
+                person_endings: ["iel", "wen", "as", "eth", "ion"],
+                place_endings: ["ael", "ion", "dor", "lith", "este"],
+                ending_chance: 0.5,
+            ),
+            title_tiers: ["Glade", "Grove", "Realm", "High Realm"]),
+
+        (id: "khazrun", name: "Khazrun", race: "dwarf",
+            description: "Clans of the deep halls.",
+            language: (
+                consonants: ["k", "kh", "g", "d", "d", "b", "r", "r", "z", "m", "n", "th", "dr", "gr"],
+                vowels: ["a", "a", "u", "u", "o", "i"],
+                syllables: ["CVC", "CVC", "CV", "VC"],
+                min_syllables: 1,
+                max_syllables: 3,
+                forbidden: ["khkh", "drdr", "grgr", "zz"],
+                person_endings: ["in", "ur", "ak", "rim", "grim"],
+                place_endings: ["dum", "zad", "gor", "hold", "deep"],
+                ending_chance: 0.55,
+            ),
+            title_tiers: ["Hold", "Clanhold", "Throne", "High Throne"]),
+
+        (id: "urzog", name: "Urzog", race: "orc",
+            description: "War-bands of the scorched steppe.",
+            language: (
+                consonants: ["g", "g", "k", "r", "r", "z", "sh", "gr", "kr", "m", "b", "d", "t"],
+                vowels: ["a", "a", "u", "u", "o"],
+                syllables: ["CVC", "CV", "CVC"],
+                min_syllables: 1,
+                max_syllables: 2,
+                forbidden: ["aa", "uu", "oo", "shsh"],
+                person_endings: ["ak", "ug", "ash", "rok", "gul"],
+                place_endings: ["gash", "mok", "ul", "dar", "grub"],
+                ending_chance: 0.6,
+            ),
+            title_tiers: ["Camp", "Warband", "Horde", "Great Horde"]),
+    ],
+)

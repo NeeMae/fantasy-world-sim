@@ -1,0 +1,20 @@
+// Races: the peoples of the world. Not simulated yet (that's Phase 2);
+// for now they define who the cultures belong to.
+//
+// `biomes` and `reliefs` are the land a race favours when settling.
+(
+    races: [
+        (id: "human", name: "Humans", lifespan: 70.0,
+            description: "Short-lived, numerous and restless; at home almost anywhere.",
+            biomes: ["grassland", "forest", "savanna"]),
+        (id: "elf", name: "Elves", lifespan: 700.0,
+            description: "Long-lived and few, keepers of old forests.",
+            biomes: ["forest", "jungle", "alpine"]),
+        (id: "dwarf", name: "Dwarves", lifespan: 250.0,
+            description: "Stubborn delvers who build beneath the mountains.",
+            biomes: ["alpine", "crags", "taiga"], reliefs: ["hills", "mountains", "high_mountains"]),
+        (id: "orc", name: "Orcs", lifespan: 45.0,
+            description: "Fierce, fast-breeding clans of the hard lands.",
+            biomes: ["savanna", "desert", "tundra", "crags"], reliefs: ["hills"]),
+    ],
+)

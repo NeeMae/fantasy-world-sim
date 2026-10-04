@@ -80,6 +80,8 @@ pub enum MapMode {
     Rainfall,
     /// Temperature, from frozen to tropical.
     Temperature,
+    /// How well the land feeds people.
+    Fertility,
 }
 
 impl Default for RenderOptions {
@@ -193,6 +195,21 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
                     );
                     if biome.water { c.scale(0.55) } else { c }
                 }
+                MapMode::Fertility => {
+                    if biome.water {
+                        Rgb(40, 50, 70)
+                    } else {
+                        ramp(
+                            &[
+                                (0.0, Rgb(120, 95, 80)),
+                                (0.3, Rgb(200, 180, 110)),
+                                (0.7, Rgb(110, 175, 70)),
+                                (1.0, Rgb(40, 140, 50)),
+                            ],
+                            world.terrain.fertility(registry, i),
+                        )
+                    }
+                }
                 MapMode::Temperature => {
                     let c = ramp(
                         &[
@@ -224,15 +241,27 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
             }
             let mut c = base.scale(shade);
 
+            let rivers = matches!(opts.mode, MapMode::Terrain | MapMode::Rainfall | MapMode::Fertility);
+            if rivers && !biome.water && on_river(world, &opts.layout, HexId(id), x, y, map_w, wraps) {
+                let water = Rgb(58, 104, 172).scale(1.0 + (BAYER[y % 4][x % 4] - 0.5) * 0.08);
+                px.copy_from_slice(&[water.0, water.1, water.2, 255]);
+                continue;
+            }
             let symbols =
                 opts.mode == MapMode::Terrain && !coast && !biome.water && opts.layout.size >= MIN_GLYPH_SIZE;
             if symbols
                 && let Some(ink) = relief_ink(world, registry, &opts.layout, HexId(id), x, y, map_w, wraps)
             {
+                // On very bright ground (snowfields) "lit" can't get any
+                // lighter, so both faces step down instead.
+                let bright = c.0 as u32 + c.1 as u32 + c.2 as u32 > 600;
                 c = match ink {
+                    Ink::Light if bright => c.scale(0.95),
                     Ink::Light => c.scale(1.25),
+                    Ink::Shade if bright => c.scale(0.74),
                     Ink::Shade => c.scale(0.8),
                     Ink::Dark => c.scale(0.45),
+                    Ink::Snow => Rgb(236, 240, 244),
                 };
             }
             px.copy_from_slice(&[c.0, c.1, c.2, 255]);
@@ -319,6 +348,60 @@ pub fn outline(
     Some(Outline { rect, rgba })
 }
 
+/// Where a hex's river runs through it: its centre nudged a little by a
+/// hash, so rivers meander instead of tracing the hex grid.
+fn river_node(topo: &Topology, layout: &HexLayout, hex: HexId) -> (f32, f32) {
+    let (x, y) = layout.center(topo, hex);
+    let h = sim_core::rng::mix(hex.0 as u64, 1, 0, 0);
+    let unit = |bits: u64| (bits & 0xffff) as f32 / 65535.0 - 0.5;
+    (x + unit(h) * layout.size * 0.6, y + unit(h >> 16) * layout.size * 0.6)
+}
+
+/// Whether map pixel `(x, y)`, in hex `own`, lies on a river: the stretch
+/// from `own` to the hex it drains into, or from a river draining into it.
+fn on_river(
+    world: &World,
+    layout: &HexLayout,
+    own: HexId,
+    x: usize,
+    y: usize,
+    map_w: u32,
+    wraps: bool,
+) -> bool {
+    let t = &world.terrain;
+    let topo = &world.topology;
+    let p = (x as f32 + 0.5, y as f32 + 0.5);
+    // Positions relative to this pixel, the short way round a wrapping map.
+    let near = |(nx, ny): (f32, f32)| {
+        let mut dx = nx - p.0;
+        if wraps {
+            dx -= (dx / map_w as f32).round() * map_w as f32;
+        }
+        (dx, ny - p.1)
+    };
+    let reach = |from: HexId, to: u32| -> bool {
+        let size = t.river(from.index());
+        if size <= 0.0 || to == sim_core::NO_DRAIN {
+            return false;
+        }
+        let half_width = (0.45 + 0.3 * size.min(4.0)) * (layout.size / 4.0).max(0.5);
+        let a = near(river_node(topo, layout, from));
+        let b = near(river_node(topo, layout, HexId(to)));
+        distance_to_segment(a, b) <= half_width
+    };
+    reach(own, t.drain[own.index()])
+        || topo.neighbors(own).any(|nb| t.drain[nb.index()] == own.0 && reach(nb, own.0))
+}
+
+/// Distance from the origin to the segment `a`–`b`.
+fn distance_to_segment(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 { (-(a.0 * dx + a.1 * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let (cx, cy) = (a.0 + dx * t, a.1 + dy * t);
+    (cx * cx + cy * cy).sqrt()
+}
+
 /// Height ramp: navy deeps to pale shallows, then green lowlands through
 /// tan and brown uplands to white peaks.
 fn elevation_color(e: f32, water: bool) -> Rgb {
@@ -387,9 +470,12 @@ enum Ink {
     Shade,
     /// Outline.
     Dark,
+    /// Snowcap.
+    Snow,
 }
 
-/// Pixel-art relief symbols: `D` outline, `L` sunlit face, `S` shadowed face.
+/// Pixel-art relief symbols: `D` outline, `L` sunlit face, `S` shadowed
+/// face, `W` snow.
 ///
 /// One symbol is drawn per seven-hex "flower" (see [`flower_centre`]), at
 /// the flower's centre with a small hashed offset: spaced out like a
@@ -404,6 +490,18 @@ const MOUNTAIN: [&str; 8] = [
     "..DLLLLLSSSSD..",
     ".DLLLLLLSSSSSD.",
     "DLLLLLLLSSSSSSD",
+];
+/// The highest ground: a tall snow-capped peak between two lesser ones,
+/// wider than a mountain so the cores of great ranges read as solid massifs.
+const PEAKS: [&str; 8] = [
+    "........D........",
+    ".......DWD.......",
+    "......DWWSD......",
+    "...D.DLLLSSD.D...",
+    "..DWDLLLLLSSDWD..",
+    ".DLLLDLLLLSSDLSD.",
+    "DLLLLDLLLLLSSDSSD",
+    "DLLLLLLLLLLSSSSSD",
 ];
 const HILLS: [&str; 4] = ["...DDD........", ".DDLLSDD..DDD.", "DLLLLSSSDDLLSD", "..............."];
 
@@ -464,6 +562,7 @@ fn glyph_pixel(glyph: content::Glyph, size: f32, dx: f32, dy: f32) -> Option<Ink
         content::Glyph::None => return None,
         content::Glyph::Mountains => &MOUNTAIN,
         content::Glyph::Hills => &HILLS,
+        content::Glyph::Peaks => &PEAKS,
     };
     let scale = (size / 4.0).floor().max(1.0);
     let (w, h) = (rows[0].len() as i32, rows.len() as i32);
@@ -474,6 +573,7 @@ fn glyph_pixel(glyph: content::Glyph, size: f32, dx: f32, dy: f32) -> Option<Ink
         b'L' => Some(Ink::Light),
         b'S' => Some(Ink::Shade),
         b'D' => Some(Ink::Dark),
+        b'W' => Some(Ink::Snow),
         _ => None,
     }
 }

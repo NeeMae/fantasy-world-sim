@@ -13,6 +13,7 @@ pub type SimRng = ChaCha8Rng;
 /// rolling for the same entity on the same tick get independent numbers.
 pub mod purpose {
     pub const WORLDGEN: u64 = 1;
+    pub const NAMES: u64 = 2;
 }
 
 /// A random stream unique to `(seed, tick, entity, purpose)`.

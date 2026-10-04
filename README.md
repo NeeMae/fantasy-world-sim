@@ -6,7 +6,9 @@ and can optionally step in as a god or take the throne of a realm.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the design and roadmap.
 
-**Status:** Phase 0.5. Worlds generate, render and can be reshaped by hand; nothing lives in them yet.
+**Status:** Phase 1 (living land) prototyped: tectonics, simulated climate,
+rivers and lakes, fertility, and cultures with their own languages. Nothing
+lives in the world yet; that's Phase 2.
 
 ## Running
 
@@ -32,7 +34,7 @@ App controls:
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
-| M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Plates |
+| M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Plates |
 | Space, 1–5 | Pause/resume, speed |
 
 The World panel generates a new world from:
@@ -49,7 +51,8 @@ The World panel generates a new world from:
 
 `sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
 `--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`),
-and `--view terrain|elevation|rainfall|temperature|plates` for `--png`.
+`--volatility`, `--view terrain|elevation|rainfall|temperature|fertility|plates`
+for `--png`, and `--names N` to print sample names for every culture.
 
 Mountains come from plate tectonics: colliding plates raise ranges (with
 trenches offshore and island arcs at sea), separating plates open rifts, and
@@ -62,6 +65,11 @@ out steadily, and dump most of it on the windward side of mountains,
 leaving rain shadows behind them. Latitude bands make the equator wet and
 the subtropics dry.
 
+Rivers come from that rainfall: sinks are filled so everything drains to
+the sea (or off an open edge), water gathers downhill into rivers, and
+basins that rivers keep filled become lakes. Rivers water their banks, so
+a river through a desert keeps a green floodplain.
+
 ## Layout
 
 | Crate | Purpose |
@@ -70,6 +78,7 @@ the subtropics dry.
 | `crates/content` | Def schemas and the RON content-pack loader |
 | `crates/worldgen` | Procedural terrain and biomes |
 | `crates/map-raster` | Draws the hex world as pixel art (used by the app and CLI) |
+| `crates/names` | Name generator for culture languages |
 | `crates/sim-cli` | Headless runner |
 | `crates/app` | Bevy + egui desktop app |
 | `packs/base` | Default content; the base game is just a pack |
@@ -110,6 +119,22 @@ ranges keep the biome of the land around them:
 
 ```ron
 (id: "alpine", relief: ["mountains"], massif: (0.35, 1.0), moisture: (0.3, 1.0), priority: 6)
+```
+
+Biomes and reliefs also carry `fertility` and `travel_cost`, which Phase 2's
+peoples will use.
+
+Races and cultures live in `races.ron` and `cultures.ron`. Each culture
+defines its own language (sounds, syllable shapes, forbidden sequences and
+endings for people and places), and names are generated from it:
+
+```ron
+language: (
+    consonants: ["k", "kh", "g", "d", "r", "z", "m", "n"],
+    vowels: ["a", "u", "o", "i"],
+    syllables: ["CVC", "CV", "VC"],
+    place_endings: ["dum", "zad", "gor"],
+)
 ```
 
 Relief defs pick a range of the tectonically driven `ruggedness` value and

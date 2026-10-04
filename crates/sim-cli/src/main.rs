@@ -35,6 +35,9 @@ struct Args {
     /// How much of the planet the map shows: 1 is a region, 4+ several continents.
     #[arg(long, default_value_t = 1.0)]
     world_size: f64,
+    /// How turbulent history is, 0 (calm) to 1 (chaotic).
+    #[arg(long, default_value_t = 0.5)]
+    volatility: f32,
     /// Size of landmasses: larger gives fewer, bigger continents.
     #[arg(long, default_value_t = 1.0)]
     continent_size: f64,
@@ -60,6 +63,9 @@ struct Args {
     /// Draw hex outlines in `--png`.
     #[arg(long)]
     grid: bool,
+    /// Print this many sample person and place names for each culture.
+    #[arg(long, default_value_t = 0)]
+    names: usize,
     /// What `--png` shows.
     #[arg(long, value_enum, default_value_t = View::Terrain)]
     view: View,
@@ -77,6 +83,8 @@ enum View {
     Rainfall,
     /// Temperature.
     Temperature,
+    /// Fertility.
+    Fertility,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -122,6 +130,10 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let packs: Vec<_> = registry.packs().iter().map(|p| p.id.as_str()).collect();
     println!("content: packs [{}], {} biomes", packs.join(", "), registry.biomes().len());
 
+    if args.names > 0 {
+        print_names(&registry, args.seed, args.names);
+    }
+
     let params = WorldGenParams {
         seed: args.seed,
         width: args.width,
@@ -136,6 +148,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
         world_size: args.world_size,
         continent_scale: args.continent_size,
+        rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
         latitudes: match (args.climate, args.shape) {
             (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,
             (Some(Climate::Regional), _) | (None, Shape::Flat) => worldgen::Latitudes::default(),
@@ -172,6 +185,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             View::Plates => MapMode::Plates,
             View::Rainfall => MapMode::Rainfall,
             View::Temperature => MapMode::Temperature,
+            View::Fertility => MapMode::Fertility,
         };
         let opts = RenderOptions {
             layout: HexLayout { size: args.hex_size },
@@ -184,6 +198,19 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("wrote {} ({}x{} px)", path.display(), img.width, img.height);
     }
     Ok(())
+}
+
+fn print_names(registry: &content::Registry, seed: u64, count: usize) {
+    for (i, culture) in registry.cultures().iter().enumerate() {
+        let mut rng = sim_core::rng::stream(seed, 0, i as u64, sim_core::rng::purpose::NAMES);
+        let mut sample = |kind| {
+            (0..count).map(|_| names::generate(&culture.def.language, kind, &mut rng)).collect::<Vec<_>>()
+        };
+        let (people, places) = (sample(names::NameKind::Person), sample(names::NameKind::Place));
+        println!("{} ({}):", culture.def.name, registry.race(culture.race_id).name);
+        println!("  people: {}", people.join(", "));
+        println!("  places: {}", places.join(", "));
+    }
 }
 
 fn print_biomes(world: &sim_core::World, registry: &content::Registry) {
@@ -208,6 +235,10 @@ fn print_biomes(world: &sim_core::World, registry: &content::Registry) {
             .count();
         println!("  relief {:<10} {:>6.2}% of land", relief.name, n as f64 / land as f64 * 100.0);
     }
+    let rivers = (0..world.terrain.len())
+        .filter(|&i| world.terrain.river(i) > 0.0 && !registry.biome(world.terrain.biome[i]).water)
+        .count();
+    println!("  rivers       {:>6.2}% of land", rivers as f64 / land as f64 * 100.0);
     let continental = world.geology.plates.iter().filter(|p| p.continental).count();
     println!("  plates: {} ({continental} continental)", world.geology.plates.len());
 }

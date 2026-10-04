@@ -14,12 +14,15 @@
 // like the Himalaya). Small ranges keep the biome of the land around them;
 // great ones get their own.
 //
+// `fertility` (0..1) is how well the land feeds people and `travel_cost` how
+// hard it is to cross, relative to grassland (1). Relief scales both.
+//
 // Moisture comes from simulated rainfall: winds carry it in from the sea,
 // and mountains wring it out, leaving dry rain shadows in their lee.
 (
     biomes: [
         // ---- Water ---------------------------------------------------------
-        (id: "water_base", abstract: true, water: true, elevation: (0.0, 0.55)),
+        (id: "water_base", abstract: true, water: true, elevation: (0.0, 0.55), fertility: 0.0, travel_cost: 3.0),
 
         (id: "deep_ocean", parent: "water_base", name: "Deep Ocean", color: "#1d335e",
             elevation: (0.0, 0.33)),
@@ -27,42 +30,47 @@
             elevation: (0.33, 0.5)),
         (id: "shallows", parent: "water_base", name: "Shallows", color: "#3a6fae",
             elevation: (0.5, 0.55)),
-        (id: "sea_ice", parent: "water_base", name: "Sea Ice", color: "#c9dbe6",
+        (id: "sea_ice", parent: "water_base", name: "Sea Ice", color: "#c9dbe6", travel_cost: 4.0,
             temperature: (0.0, 0.07), priority: 5),
+
+        // Lakes form in basins that rivers keep filled (see `lake`).
+        (id: "lake", name: "Lake", color: "#3d77b4", water: true, lake: true, travel_cost: 2.0),
+        (id: "frozen_lake", name: "Frozen Lake", color: "#d2e2ec", water: true, lake: true, travel_cost: 2.0,
+            temperature: (0.0, 0.08), priority: 1),
 
         // ---- Land ----------------------------------------------------------
         (id: "land_base", abstract: true, water: false, elevation: (0.55, 1.0)),
 
-        (id: "grassland", parent: "land_base", name: "Grassland", color: "#7aa64a"),
-        (id: "forest", parent: "land_base", name: "Forest", color: "#3e7432",
+        (id: "grassland", parent: "land_base", name: "Grassland", color: "#7aa64a", fertility: 0.8),
+        (id: "forest", parent: "land_base", name: "Forest", color: "#3e7432", fertility: 0.6, travel_cost: 1.6,
             temperature: (0.3, 0.72), moisture: (0.55, 1.0), priority: 1),
-        (id: "taiga", parent: "land_base", name: "Taiga", color: "#335a46",
+        (id: "taiga", parent: "land_base", name: "Taiga", color: "#335a46", fertility: 0.3, travel_cost: 1.8,
             temperature: (0.16, 0.3), moisture: (0.35, 1.0), priority: 1),
-        (id: "tundra", parent: "land_base", name: "Tundra", color: "#8b9a86",
+        (id: "tundra", parent: "land_base", name: "Tundra", color: "#8b9a86", fertility: 0.1, travel_cost: 1.5,
             temperature: (0.0, 0.16), priority: 1),
-        (id: "glacier", parent: "land_base", name: "Glacier", color: "#e9f0f4",
+        (id: "glacier", parent: "land_base", name: "Glacier", color: "#e9f0f4", fertility: 0.0, travel_cost: 4.0,
             temperature: (0.0, 0.06), priority: 2),
-        (id: "savanna", parent: "land_base", name: "Savanna", color: "#b3a24c",
+        (id: "savanna", parent: "land_base", name: "Savanna", color: "#b3a24c", fertility: 0.5, travel_cost: 1.1,
             temperature: (0.62, 1.0), moisture: (0.25, 0.55), priority: 1),
-        (id: "desert", parent: "land_base", name: "Desert", color: "#d9c27e",
+        (id: "desert", parent: "land_base", name: "Desert", color: "#d9c27e", fertility: 0.05, travel_cost: 1.6,
             temperature: (0.55, 1.0), moisture: (0.0, 0.25), priority: 1),
-        (id: "jungle", parent: "land_base", name: "Jungle", color: "#2a7232",
+        (id: "jungle", parent: "land_base", name: "Jungle", color: "#2a7232", fertility: 0.5, travel_cost: 2.6,
             temperature: (0.72, 1.0), moisture: (0.6, 1.0), priority: 2),
-        (id: "swamp", parent: "land_base", name: "Swamp", color: "#536b49",
-            elevation: (0.55, 0.6), moisture: (0.85, 1.0), temperature: (0.35, 1.0), priority: 3),
+        (id: "swamp", parent: "land_base", name: "Swamp", color: "#536b49", fertility: 0.35, travel_cost: 3.0,
+            elevation: (0.55, 0.58), moisture: (0.93, 1.0), temperature: (0.35, 1.0), priority: 3),
 
         // ---- Great ranges --------------------------------------------------
-        (id: "mountain_base", abstract: true, parent: "land_base", relief: ["mountains"],
+        (id: "mountain_base", abstract: true, parent: "land_base", relief: ["mountains", "high_mountains"],
             massif: (0.35, 1.0), priority: 6),
 
         // Wet, temperate ranges: high meadows and conifers (the Alps).
-        (id: "alpine", parent: "mountain_base", name: "Alpine", color: "#7f9471",
+        (id: "alpine", parent: "mountain_base", name: "Alpine", color: "#7f9471", fertility: 0.2,
             moisture: (0.3, 1.0), temperature: (0.12, 0.75)),
         // Dry ranges: bare rock and scree (the Rockies' rain-shadow side).
-        (id: "crags", parent: "mountain_base", name: "Crags", color: "#8c7d6c",
+        (id: "crags", parent: "mountain_base", name: "Crags", color: "#8c7d6c", fertility: 0.05,
             moisture: (0.0, 0.3)),
         // The roof of the world (the Himalaya).
-        (id: "snowy_peaks", parent: "mountain_base", name: "Snowy Peaks", color: "#e6ebef",
+        (id: "snowy_peaks", parent: "mountain_base", name: "Snowy Peaks", color: "#e6ebef", fertility: 0.0,
             massif: (0.6, 1.0), temperature: (0.0, 0.3), priority: 7),
 
     ],

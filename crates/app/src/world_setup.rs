@@ -53,6 +53,7 @@ pub struct WorldSettings {
     pub edges: EdgeStyle,
     pub wrap: bool,
     pub climate: Climate,
+    pub volatility: f32,
 }
 
 impl Default for WorldSettings {
@@ -67,6 +68,7 @@ impl Default for WorldSettings {
             edges: EdgeStyle::Open,
             wrap: false,
             climate: Climate::Regional,
+            volatility: 0.5,
         }
     }
 }
@@ -99,6 +101,7 @@ impl WorldSettings {
                 Climate::Regional => Latitudes::default(),
                 Climate::Globe => Latitudes::Globe,
             },
+            rules: sim_core::WorldRules { volatility: self.volatility },
         })
     }
 }

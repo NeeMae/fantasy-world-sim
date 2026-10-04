@@ -19,6 +19,7 @@ use sim_core::{Geology, Plate, Terrain, Topology, World, Wrap, rng};
 use tectonics::{PlateLayer, smoothstep};
 
 mod climate;
+mod hydrology;
 mod tectonics;
 
 /// What happens at the map's edges.
@@ -50,6 +51,8 @@ pub struct WorldGenParams {
     pub continent_scale: f64,
     /// Which climate bands the map covers.
     pub latitudes: Latitudes,
+    /// World-wide rules stored in the world (e.g. volatility).
+    pub rules: sim_core::WorldRules,
 }
 
 /// How the map maps onto the planet's climate bands.
@@ -78,6 +81,7 @@ impl Default for WorldGenParams {
             world_size: 1.0,
             continent_scale: 1.0,
             latitudes: Latitudes::default(),
+            rules: sim_core::WorldRules::default(),
         }
     }
 }
@@ -307,7 +311,33 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         column_step,
         row_step: params.world_size / params.height as f64,
     });
-    terrain.moisture = rain.iter().zip(&variation).map(|(r, v)| r * (1.0 + 0.3 * v)).collect();
+
+    // Rivers and lakes from that rainfall.
+    let row_step = params.world_size / params.height as f64;
+    let water = hydrology::compute(&topology, &terrain.elevation, &sea, &rain, column_step * row_step);
+    terrain.drain = water.drain;
+    terrain.discharge = water.discharge;
+    for (i, &lake) in water.lake.iter().enumerate() {
+        if lake {
+            // Lakes are water: flat, and no part of a mountain range.
+            terrain.ruggedness[i] = 0.0;
+            terrain.massif[i] = 0.0;
+            terrain.relief[i] = choose_relief(registry, 0.0);
+        }
+    }
+
+    // Rivers water their banks: a floodplain stays green through dry land.
+    let mut wet: Vec<f32> = rain.iter().zip(&variation).map(|(r, v)| r * (1.0 + 0.3 * v)).collect();
+    for i in 0..terrain.len() {
+        let size = terrain.river(i);
+        if size > 0.0 && !sea[i] {
+            wet[i] += 0.25 * size;
+            for nb in topology.neighbors(sim_core::HexId(i as u32)) {
+                wet[nb.index()] += 0.12 * size;
+            }
+        }
+    }
+    terrain.moisture = wet;
     to_percentiles(&mut terrain.moisture);
 
     terrain.biome = (0..terrain.len())
@@ -322,6 +352,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
                     temperature: t.temperature[i],
                     relief: t.relief[i],
                     massif: t.massif[i],
+                    lake: water.lake[i],
                 },
             )
         })
@@ -340,6 +371,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 
     let mut world = World::new(params.seed, topology, terrain);
     world.geology = geology;
+    world.rules = params.rules;
     Ok(world)
 }
 
@@ -431,18 +463,22 @@ fn choose_relief(registry: &Registry, r: f32) -> ReliefId {
         .unwrap_or_default()
 }
 
-/// The highest-priority biome matching the climate; the first biome if none match.
+/// The highest-priority biome matching the site; the first biome if none
+/// match. A lake with no lake biome in the content takes the biome the
+/// land there would have had.
 fn choose_biome(registry: &Registry, site: Site) -> BiomeId {
-    registry
-        .biomes()
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.matches(site))
-        // `max_by_key` keeps the last maximum; reverse so earlier defs win ties.
-        .rev()
-        .max_by_key(|(_, b)| b.priority)
-        .map(|(i, _)| BiomeId(i as u16))
-        .unwrap_or_default()
+    let best = |site: Site| {
+        registry
+            .biomes()
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.matches(site))
+            // `max_by_key` keeps the last maximum; reverse so earlier defs win ties.
+            .rev()
+            .max_by_key(|(_, b)| b.priority)
+            .map(|(i, _)| BiomeId(i as u16))
+    };
+    best(site).or_else(|| site.lake.then(|| best(Site { lake: false, ..site })).flatten()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -560,6 +596,7 @@ mod tests {
             temperature,
             relief: content::ReliefId(0),
             massif: 0.0,
+            lake: false,
         };
         assert_eq!(choose_biome(&reg, site(0.9, 0.05)), reg.biome_id("snow").unwrap());
         assert_eq!(choose_biome(&reg, site(0.9, 0.5)), reg.biome_id("land").unwrap());
@@ -578,7 +615,14 @@ mod tests {
         )
         .unwrap();
         let mountains = reg.relief_id("mountains").unwrap();
-        let site = |relief, massif| Site { elevation: 0.8, moisture: 0.6, temperature: 0.5, relief, massif };
+        let site = |relief, massif| Site {
+            elevation: 0.8,
+            moisture: 0.6,
+            temperature: 0.5,
+            relief,
+            massif,
+            lake: false,
+        };
         let forest = reg.biome_id("forest").unwrap();
         let alpine = reg.biome_id("alpine").unwrap();
         assert_eq!(choose_biome(&reg, site(mountains, 0.8)), alpine, "the Alps");

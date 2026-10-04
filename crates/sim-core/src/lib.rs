@@ -16,4 +16,4 @@ pub use command::{Command, EditId, Paint};
 pub use hex::{Axial, HexId, Topology, Wrap, round_axial};
 pub use sim::Simulation;
 pub use time::Date;
-pub use world::{Geology, Plate, Terrain, World};
+pub use world::{Geology, NO_DRAIN, Plate, RIVER_DISCHARGE, Terrain, World, WorldRules};

@@ -5,11 +5,17 @@
 // and old boundaries leave hill country. The matching relief with the
 // highest `priority` wins. Seas are always flat.
 //
-// `glyph` picks the placeholder map symbol: "none", "hills" or "mountains".
+// `fertility` and `travel_cost` multiply the biome's values.
+// `glyph` picks the placeholder map symbol: "none", "hills", "mountains" or
+// "peaks".
 (
     reliefs: [
         (id: "flat", name: "Flat", ruggedness: (0.0, 0.22)),
-        (id: "hills", name: "Hills", ruggedness: (0.22, 0.48), glyph: "hills"),
-        (id: "mountains", name: "Mountains", ruggedness: (0.48, 1.0), glyph: "mountains"),
+        (id: "hills", name: "Hills", ruggedness: (0.22, 0.48), glyph: "hills",
+            fertility: 0.8, travel_cost: 1.5),
+        (id: "mountains", name: "Mountains", ruggedness: (0.48, 0.7), glyph: "mountains",
+            fertility: 0.4, travel_cost: 3.0),
+        (id: "high_mountains", name: "High Mountains", ruggedness: (0.7, 1.0), glyph: "peaks",
+            fertility: 0.1, travel_cost: 5.0),
     ],
 )

@@ -26,6 +26,8 @@ pub fn panels(
     mut regenerate: MessageWriter<RegenerateRequest>,
     mut over_ui: ResMut<PointerOverUi>,
     mut map_mode: ResMut<MapModeSetting>,
+    // Bumped by "More names" so the samples change.
+    mut name_draw: Local<u64>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let snap = sim.snapshot();
@@ -38,7 +40,9 @@ pub fn panels(
 
     let top = egui::Panel::top("time").show(&mut root, |ui| {
         ui.horizontal(|ui| {
-            ui.strong(Date::from_tick(snap.tick).to_string());
+            // Fixed-width slots, so the controls beside them don't shift as
+            // the date grows or the rate changes.
+            fixed_label(ui, "Year 9999999, month 12", Date::from_tick(snap.tick).to_string(), true);
             ui.separator();
             let current = sim.speed();
             for (i, (label, speed)) in SPEEDS.iter().enumerate() {
@@ -53,14 +57,18 @@ pub fn panels(
                 (MapMode::Elevation, "Elevation"),
                 (MapMode::Rainfall, "Rainfall"),
                 (MapMode::Temperature, "Temperature"),
+                (MapMode::Fertility, "Fertility"),
                 (MapMode::Plates, "Plates"),
             ] {
                 ui.selectable_value(&mut map_mode.0, mode, label).on_hover_text("M cycles map views");
             }
             ui.separator();
-            if current != Speed::Paused {
-                ui.label(format!("{:.0} ticks/s", snap.ticks_per_second));
-            }
+            let rate = if current == Speed::Paused {
+                String::new()
+            } else {
+                format!("{:.0} ticks/s", snap.ticks_per_second)
+            };
+            fixed_label(ui, "999999 ticks/s", rate, false);
             if let Some(hex) = hover.0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (col, row) = world.topology.offset(hex);
@@ -78,6 +86,8 @@ pub fn panels(
             tools_section(ui, &mut tools, &view, &sim, snap.undo_redo);
             ui.separator();
             inspector_section(ui, &selection, &view, world);
+            ui.separator();
+            peoples_section(ui, &view, world, &mut name_draw);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
             ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view");
@@ -184,6 +194,19 @@ fn world_section(
             // A wrapped world is usually a whole planet.
             settings.climate = if settings.wrap { Climate::Globe } else { Climate::Regional };
         }
+        ui.end_row();
+
+        ui.label("Volatility")
+            .on_hover_text("How turbulent history will be: calm, long-lived empires or constant upheaval");
+        ui.add(egui::Slider::new(&mut settings.volatility, 0.0..=1.0).custom_formatter(|v, _| {
+            match v {
+                v if v < 0.25 => "Calm",
+                v if v < 0.55 => "Settled",
+                v if v < 0.8 => "Turbulent",
+                _ => "Chaotic",
+            }
+            .to_string()
+        }));
         ui.end_row();
 
         ui.label("Climate");
@@ -296,6 +319,9 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
                 ),
             ),
             ("Range", range_description(t.massif[i])),
+            ("River", river_description(t, i)),
+            ("Fertility", format!("{:.0}%", t.fertility(&view.registry, i) * 100.0)),
+            ("Travel cost", format!("×{:.1}", t.travel_cost(&view.registry, i))),
             ("Plate", plate_description(world, i)),
         ] {
             ui.label(label);
@@ -306,6 +332,66 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, w
         ui.monospace(&biome.id);
         ui.end_row();
     });
+}
+
+/// Text in a slot as wide as `widest` would be, so whatever follows it
+/// stays put while the text changes.
+fn fixed_label(ui: &mut egui::Ui, widest: &str, text: String, strong: bool) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = if strong { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
+    let width = ui.fonts_mut(|f| f.layout_no_wrap(widest.to_string(), font.clone(), color).size().x);
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, ui.spacing().interact_size.y), egui::Sense::hover());
+    // Clipped, so even an absurdly long date can't spill over its neighbours.
+    ui.painter().with_clip_rect(rect).text(rect.left_center(), egui::Align2::LEFT_CENTER, text, font, color);
+}
+
+/// The cultures in the loaded content, each with sample names in its own
+/// language. Peoples aren't placed in the world yet (that's Phase 2).
+fn peoples_section(ui: &mut egui::Ui, view: &MapView, world: &sim_core::World, draw: &mut u64) {
+    egui::CollapsingHeader::new(egui::RichText::new("Peoples").heading()).default_open(false).show(
+        ui,
+        |ui| {
+            let registry = &view.registry;
+            if registry.cultures().is_empty() {
+                ui.label("No cultures in the loaded content.");
+                return;
+            }
+            for (i, culture) in registry.cultures().iter().enumerate() {
+                let race = registry.race(culture.race_id);
+                let mut rng =
+                    sim_core::rng::stream(world.seed, *draw, i as u64, sim_core::rng::purpose::NAMES);
+                let mut sample = |kind| {
+                    (0..4)
+                        .map(|_| names::generate(&culture.def.language, kind, &mut rng))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let (people, places) = (sample(names::NameKind::Person), sample(names::NameKind::Place));
+                ui.label(egui::RichText::new(format!("{} ({})", culture.def.name, race.name)).strong())
+                    .on_hover_text(format!(
+                        "{}\n{} (lifespan ~{} years)",
+                        culture.def.description, race.description, race.lifespan
+                    ));
+                ui.small(format!("People: {people}"));
+                ui.small(format!("Places: {places}"));
+                ui.small(format!("Titles: {}", culture.def.title_tiers.join(" › ")));
+                ui.add_space(4.0);
+            }
+            if ui.button("More names").clicked() {
+                *draw += 1;
+            }
+        },
+    );
+}
+
+fn river_description(t: &sim_core::Terrain, i: usize) -> String {
+    match t.river(i) {
+        r if r <= 0.0 => "None".into(),
+        r if r < 2.0 => "Stream".into(),
+        r if r < 4.0 => "River".into(),
+        _ => "Great river".into(),
+    }
 }
 
 fn range_description(massif: f32) -> String {
@@ -356,7 +442,8 @@ pub fn hotkeys(
             MapMode::Terrain => MapMode::Elevation,
             MapMode::Elevation => MapMode::Rainfall,
             MapMode::Rainfall => MapMode::Temperature,
-            MapMode::Temperature => MapMode::Plates,
+            MapMode::Temperature => MapMode::Fertility,
+            MapMode::Fertility => MapMode::Plates,
             MapMode::Plates => MapMode::Terrain,
         };
     }

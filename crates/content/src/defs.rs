@@ -37,6 +37,10 @@ pub struct BiomeDef {
     /// Whether the biome is open water (blocks land settlement and movement).
     #[serde(default)]
     pub water: bool,
+    /// Whether the biome is for lakes. Lake hexes only take lake biomes, and
+    /// other hexes never do.
+    #[serde(default)]
+    pub lake: bool,
     #[serde(default)]
     pub elevation: Range,
     #[serde(default)]
@@ -50,6 +54,12 @@ pub struct BiomeDef {
     /// ranges) to 1 (the greatest collision ranges).
     #[serde(default)]
     pub massif: Range,
+    /// How well the land feeds people, 0 (barren) to 1 (the richest).
+    #[serde(default)]
+    pub fertility: f32,
+    /// How hard the land is to cross, relative to open grassland (1).
+    #[serde(default = "one")]
+    pub travel_cost: f32,
     /// Higher priority wins when several biomes match.
     #[serde(default)]
     pub priority: i32,
@@ -66,6 +76,7 @@ pub struct Site {
     pub temperature: f32,
     pub relief: ReliefId,
     pub massif: f32,
+    pub lake: bool,
 }
 
 impl BiomeDef {
@@ -74,6 +85,7 @@ impl BiomeDef {
             && self.moisture.contains(site.moisture)
             && self.temperature.contains(site.temperature)
             && self.massif.contains(site.massif)
+            && self.lake == site.lake
             && (self.relief_ids.is_empty() || self.relief_ids.contains(&site.relief))
     }
 }
@@ -88,6 +100,8 @@ pub enum Glyph {
     None,
     Hills,
     Mountains,
+    /// A dense cluster of snow-capped peaks, for the highest ground.
+    Peaks,
 }
 
 impl TryFrom<String> for Glyph {
@@ -98,7 +112,10 @@ impl TryFrom<String> for Glyph {
             "none" => Ok(Glyph::None),
             "hills" => Ok(Glyph::Hills),
             "mountains" => Ok(Glyph::Mountains),
-            _ => Err(format!("unknown glyph {s:?}; expected \"none\", \"hills\" or \"mountains\"")),
+            "peaks" => Ok(Glyph::Peaks),
+            _ => {
+                Err(format!("unknown glyph {s:?}; expected \"none\", \"hills\", \"mountains\" or \"peaks\""))
+            }
         }
     }
 }
@@ -109,6 +126,7 @@ impl From<Glyph> for String {
             Glyph::None => "none",
             Glyph::Hills => "hills",
             Glyph::Mountains => "mountains",
+            Glyph::Peaks => "peaks",
         }
         .into()
     }
@@ -132,6 +150,16 @@ pub struct ReliefDef {
     pub priority: i32,
     #[serde(default)]
     pub glyph: Glyph,
+    /// Multiplies the biome's fertility (steep ground farms worse).
+    #[serde(default = "one")]
+    pub fertility: f32,
+    /// Multiplies the biome's travel cost.
+    #[serde(default = "one")]
+    pub travel_cost: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl ReliefDef {
@@ -143,6 +171,95 @@ impl ReliefDef {
             ruggedness: Range::ANY,
             priority: 0,
             glyph: Glyph::None,
+            fertility: 1.0,
+            travel_cost: 1.0,
         }
     }
+}
+
+/// A people: elves, dwarves, humans, ...
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RaceDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Typical lifespan in years.
+    #[serde(default = "lifespan")]
+    pub lifespan: f32,
+    /// Biome ids this race favours when settling.
+    #[serde(default)]
+    pub biomes: Vec<String>,
+    /// Relief ids this race favours (dwarves and mountains, say).
+    #[serde(default)]
+    pub reliefs: Vec<String>,
+}
+
+fn lifespan() -> f32 {
+    70.0
+}
+
+/// A culture: a people's way of life, language and naming.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CultureDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// The race id this culture belongs to.
+    pub race: String,
+    #[serde(default)]
+    pub description: String,
+    pub language: LanguageDef,
+    /// What this culture calls its four tiers of title, smallest first
+    /// (county, duchy, kingdom, empire for feudal cultures).
+    #[serde(default = "title_tiers")]
+    pub title_tiers: Vec<String>,
+}
+
+fn title_tiers() -> Vec<String> {
+    ["County", "Duchy", "Kingdom", "Empire"].map(String::from).to_vec()
+}
+
+/// How a culture's names sound.
+///
+/// Names are built from syllables. Each syllable follows one of the
+/// `syllables` patterns, where `C` is a consonant and `V` a vowel, e.g.
+/// `"CV"`, `"CVC"`, `"V"`. Repeat an entry in any list to make it more
+/// likely. Names containing any `forbidden` sequence are rejected.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageDef {
+    pub consonants: Vec<String>,
+    pub vowels: Vec<String>,
+    pub syllables: Vec<String>,
+    #[serde(default = "two")]
+    pub min_syllables: u32,
+    #[serde(default = "three")]
+    pub max_syllables: u32,
+    #[serde(default)]
+    pub forbidden: Vec<String>,
+    /// Endings for people's names (e.g. "ric", "wen").
+    #[serde(default)]
+    pub person_endings: Vec<String>,
+    /// Endings for place names (e.g. "ford", "heim").
+    #[serde(default)]
+    pub place_endings: Vec<String>,
+    /// Chance a name takes an ending.
+    #[serde(default = "half")]
+    pub ending_chance: f32,
+}
+
+fn two() -> u32 {
+    2
+}
+
+fn three() -> u32 {
+    3
+}
+
+fn half() -> f32 {
+    0.5
 }

@@ -221,6 +221,7 @@ dependencies = [
  "clap",
  "content",
  "map-raster",
+ "names",
  "sim-core",
  "worldgen",
 ]
@@ -3666,6 +3667,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "names"
+version = "0.1.0"
+dependencies = [
+ "content",
+ "rand 0.10.3",
+ "rand_chacha",
+]
+
+[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4825,6 +4835,7 @@ dependencies = [
  "content",
  "image",
  "map-raster",
+ "names",
  "sim-core",
  "worldgen",
 ]

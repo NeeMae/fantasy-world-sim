@@ -14,7 +14,7 @@ const PARENT: &str = "parent";
 const ABSTRACT: &str = "abstract";
 
 /// Def kinds a def file may contain, in the order they're built.
-const KINDS: &[&str] = &["biomes", "reliefs"];
+const KINDS: &[&str] = &["biomes", "reliefs", "races", "cultures"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContentError {
@@ -109,7 +109,9 @@ fn build_registry(
 ) -> Result<Registry, ContentError> {
     let biomes = build_kind(kinds.remove("biomes").unwrap_or_default())?;
     let reliefs = build_kind(kinds.remove("reliefs").unwrap_or_default())?;
-    Registry::new(manifests, biomes, reliefs)
+    let races = build_kind(kinds.remove("races").unwrap_or_default())?;
+    let cultures = build_kind(kinds.remove("cultures").unwrap_or_default())?;
+    Registry::new(manifests, biomes, reliefs, races, cultures)
 }
 
 fn parse_file<T: DeserializeOwned>(path: &Path) -> Result<T, ContentError> {
@@ -328,6 +330,32 @@ mod tests {
 
         let bad = load_str(r#"(biomes: [(id: "alpine", relief: ["mountain"])])"#);
         assert!(bad.unwrap_err().to_string().contains("unknown relief"));
+    }
+
+    #[test]
+    fn cultures_validate_their_race_and_language() {
+        let ok = load_str(
+            r#"(
+                races: [(id: "elf", name: "Elves", lifespan: 700.0)],
+                cultures: [(id: "ilvaren", race: "elf", language: (
+                    consonants: ["l", "r"], vowels: ["a", "e"], syllables: ["CV"],
+                ))],
+            )"#,
+        )
+        .unwrap();
+        let culture = &ok.cultures()[0];
+        assert_eq!(ok.race(culture.race_id).name, "Elves");
+        assert_eq!(culture.def.title_tiers.len(), 4);
+
+        let no_race = load_str(
+            r#"(cultures: [(id: "x", race: "elf", language: (consonants: ["l"], vowels: ["a"], syllables: ["CV"]))])"#,
+        );
+        assert!(no_race.unwrap_err().to_string().contains("unknown race"));
+
+        let bad_pattern = load_str(
+            r#"(races: [(id: "elf")], cultures: [(id: "x", race: "elf", language: (consonants: ["l"], vowels: ["a"], syllables: ["CX"]))])"#,
+        );
+        assert!(bad_pattern.unwrap_err().to_string().contains("syllable"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ sim-core = { path = "crates/sim-core" }
 content = { path = "crates/content" }
 worldgen = { path = "crates/worldgen" }
 map-raster = { path = "crates/map-raster" }
+names = { path = "crates/names" }
 
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
