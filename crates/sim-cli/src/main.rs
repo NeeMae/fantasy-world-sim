@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
+use content::Registry;
 use map_raster::{HexLayout, MapMode, RenderOptions};
-use sim_core::{Simulation, Wrap};
+use sim_core::{HexId, Simulation, World, Wrap};
 use worldgen::WorldGenParams;
 
 #[derive(Parser)]
@@ -239,6 +240,59 @@ fn print_biomes(world: &sim_core::World, registry: &content::Registry) {
         .filter(|&i| world.terrain.river(i) > 0.0 && !registry.biome(world.terrain.biome[i]).water)
         .count();
     println!("  rivers       {:>6.2}% of land", rivers as f64 / land as f64 * 100.0);
+    lake_stats(world, registry);
     let continental = world.geology.plates.iter().filter(|p| p.continental).count();
     println!("  plates: {} ({continental} continental)", world.geology.plates.len());
+}
+
+/// How many lakes there are and how compact they are: a lake hex with at
+/// most two lake neighbours is part of a thin string rather than open water.
+fn lake_stats(world: &World, registry: &Registry) {
+    let topo = &world.topology;
+    let is_lake = |i: usize| registry.biome(world.terrain.biome[i]).lake;
+    let mut seen = vec![false; topo.len()];
+    let mut sizes = Vec::new();
+    let mut thin = 0;
+    for start in 0..topo.len() {
+        if seen[start] || !is_lake(start) {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut size = 0;
+        while let Some(i) = stack.pop() {
+            size += 1;
+            let mut lake_neighbours = 0;
+            for nb in topo.neighbors(HexId(i as u32)) {
+                let j = nb.index();
+                if is_lake(j) {
+                    lake_neighbours += 1;
+                    if !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+            if lake_neighbours <= 2 {
+                thin += 1;
+            }
+        }
+        sizes.push((size, topo.offset(HexId(start as u32))));
+    }
+    if sizes.is_empty() {
+        println!("  lakes: none");
+        return;
+    }
+    let total: usize = sizes.iter().map(|s| s.0).sum();
+    sizes.sort_unstable();
+    let (largest, at) = sizes[sizes.len() - 1];
+    println!(
+        "  lakes: {} ({} hexes, largest {} at {:?}, median {}), {:.0}% of lake hexes in thin strings",
+        sizes.len(),
+        total,
+        largest,
+        at,
+        sizes[sizes.len() / 2].0,
+        thin as f64 / total as f64 * 100.0
+    );
 }

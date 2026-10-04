@@ -112,7 +112,14 @@ trivially serialisable.
   or off an open edge; drainage prefers the biggest drop in the original
   ground (so rivers follow valley floors through filled basins) with a
   hashed wobble so they meander; discharge accumulates rainfall × area
-  (scale-independent); wet basins become lakes; rivers water their banks.
+  (scale-independent); rivers water their banks.
+- **Lakes:** a lake is a whole flooded basin, not just the hexes a river
+  crosses. Water rises from the basin's lowest point until the lake covers
+  about 5% of its catchment (evaporation balancing inflow) or it spills;
+  then a shape pass keeps only open water (hexes within one step of a hex
+  surrounded by lake, or small compact ponds), so flooded valley floors stay
+  rivers instead of long strings of lake. The rest of the basin drains into
+  the lake along the real terrain.
 - **Climate:** temperature from latitude and altitude. Rainfall is
   simulated: winds by latitude band carry moisture from warm seas, rain it
   out over land, wring it out over mountains (rain shadows), with wet
