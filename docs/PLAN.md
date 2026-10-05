@@ -99,7 +99,10 @@ trivially serialisable.
   relative motion and the crust on either side decide the landform:
   continental collisions raise great ranges, ocean-under-continent gives a
   coastal range and trench, ocean-ocean gives island arcs, separation gives
-  rifts and mid-ocean ridges. Pair effects are blended with soft plate
+  rifts and mid-ocean ridges. Uplift of ocean floor (arcs, microplate
+  ridges, barely-continental crust, ridges) only breaks the surface at
+  volcanic hot spots (jittered sites, some dormant), so it rises as chains
+  of round islands rather than long lines of land. Pair effects are blended with soft plate
   memberships so the land is continuous everywhere, including triple
   junctions (tested).
 - **Relief vs biome:** relief (flat/hills/mountains, content-defined) is a
@@ -108,6 +111,20 @@ trivially serialisable.
   may require a relief and a *massif* (range greatness from the tectonic
   uplift), so the Alps, Rockies and Himalaya differ while the Appalachians
   keep their forests and hills never change the biome.
+- **Erosion:** ten rounds of a stream-power model on a fixed-resolution
+  (160-row) copy of the raw terrain, blended onto the map so every scale
+  erodes alike: gathered water cuts towards its drain (√discharge, capped
+  per round), steep slopes slump, sinks silt up. Cuts never dig below the
+  coarse eroded surface (no notches at cliff feet); deeply cut valleys lose
+  ruggedness, so ranges break up into ridges.
+- **Inland seas:** low-frequency basins sag into continental interiors
+  (the Inland seas setting); sea bodies not reaching the open ocean or an
+  open edge and under a fifth of all sea get inland-sea biomes.
+- **Ocean currents:** per row, how near land lies west and east of each sea
+  hex gives its side of the basin; subtropical gyres run warm on the west,
+  cold on the east, subpolar ones the reverse; smoothed over the sea. The
+  anomaly shifts sea temperature (so evaporation: cold currents dry their
+  coasts) and coastal land temperature.
 - **Hydrology:** priority-flood sink filling so all land drains to the sea
   or off an open edge; drainage prefers the biggest drop in the original
   ground (so rivers follow valley floors through filled basins) with a
@@ -270,13 +287,14 @@ tileset is a drop-in replacement.
 | 0.6 World shape ✅ | Open/ocean edges, world size vs scale, custom canvas, east-west wrap | Region maps through wrapped planets from one generator |
 | 0.7 Tectonics ✅ | Plates, boundary landforms, relief layer, map views (terrain/elevation/plates), relief brush | Mountain ranges follow plate collisions |
 | 0.8 Climate ✅ | Wind-driven rainfall with rain shadows, range-dependent mountain biomes, rainfall/temperature views | Deserts sit in rain shadows and subtropics |
+| 0.9 World tuning ✅ | Save/load; sea level, temperature, rainfall, mountains, erosion and inland-sea settings; island chains; ocean currents; erosion | Worlds are varied, natural and keepable |
 | 1. Living land 🧪 | Rivers and lakes (fed by simulated rainfall); biome fertility and travel cost; race, culture and language defs; name generator; world settings (volatility) | Rivers carve the map; cultures generate distinct names |
 | 2. Peoples & settlements | Population groups, growth, migration; settlements founded dynamically; counties as settlement hinterlands; border and settlement rendering | Peoples spread from origins and settle the land into counties |
 | 3. Titles & realms | County → Duchy → Kingdom → Empire; titles formed around counties; realms, vassals, expansion | Kingdoms form and fill the map |
 | 4. Conflict | Diplomacy, armies, war, rebellion, secession, scaled by volatility | Empires rise and fall unattended over 2,000 years |
 | 5. Story | Characters, dynasties, succession, chronicle and inspector UI | Clicking a realm shows its history |
 | 6. Fantasy | Monsters, magic, religion, cellular hazards, catastrophes, Rhai events | Distinctly high fantasy |
-| 7. Play | Save/load (seed + command log), more god powers, ruler mode, scenarios | Optional game layers work |
+| 7. Play | Save/load ✅ (full state, deterministic), more god powers, ruler mode, scenarios | Optional game layers work |
 | 8. Worldbuilding tools | Import heightmaps and painted maps, lore export (Markdown/JSON) | Usable as a setting-design tool |
 
 🧪 = prototyped: in place and working, still to be tuned as later phases use it.

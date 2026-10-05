@@ -49,7 +49,29 @@ pub struct Hydrology {
 
 /// `elevation` is the percentile elevation; `sea` marks sea hexes; `rain`
 /// is rainfall intensity; `cell_area` is one hex's area in noise space.
-pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], cell_area: f64) -> Hydrology {
+/// A min-heap key for a height: its bits mapped so they sort like the
+/// values (negative ones too), then the hex as a tie-break.
+fn key(v: f64, i: usize) -> Reverse<(u64, u32)> {
+    let bits = v.to_bits();
+    let ordered = if bits >> 63 == 1 { !bits } else { bits | 1 << 63 };
+    Reverse((ordered, i as u32))
+}
+
+fn unkey(ordered: u64) -> f64 {
+    f64::from_bits(if ordered >> 63 == 1 { ordered & !(1 << 63) } else { !ordered })
+}
+
+/// Where water goes, without lakes: sinks filled, each hex's drain, and the
+/// discharge through it. `elevation` may be any values (not only
+/// percentiles).
+pub struct Drainage {
+    pub drain: Vec<u32>,
+    pub discharge: Vec<f32>,
+    /// The ground with every sink filled to its spill level.
+    pub filled: Vec<f64>,
+}
+
+pub fn drainage(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], cell_area: f64) -> Drainage {
     let n = topo.len();
     let (w, h) = (topo.width() as i32, topo.height() as i32);
     let on_edge = |id: HexId| {
@@ -62,7 +84,7 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     let mut filled = vec![f64::INFINITY; n];
     let mut done = vec![false; n];
     let mut queue = BinaryHeap::new();
-    let key = |v: f64, i: usize| Reverse((v.to_bits(), i as u32)); // v >= 0, so bits order like values
+
     for id in topo.ids() {
         let i = id.index();
         if sea[i] || on_edge(id) {
@@ -76,7 +98,7 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
             continue;
         }
         done[i] = true;
-        let level = f64::from_bits(bits);
+        let level = unkey(bits);
         for nb in topo.neighbors(HexId(i as u32)) {
             let j = nb.index();
             if done[j] || sea[j] {
@@ -96,12 +118,18 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     // steepest way down, and across filled basins it follows the old valley
     // floor instead of a dead-straight line to the outlet. Edge hexes with
     // no lower neighbour drain off the map.
-    let mut drain: Vec<u32> = (0..n)
+    let drain: Vec<u32> = (0..n)
         .map(|i| if sea[i] { NO_DRAIN } else { downhill(topo, elevation, &filled, i, |_| true) })
         .collect();
 
     // 3. Gather rain downhill.
     let discharge = accumulate(&drain, sea, rain, cell_area);
+    Drainage { drain, discharge, filled }
+}
+
+pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], cell_area: f64) -> Hydrology {
+    let n = topo.len();
+    let Drainage { mut drain, discharge, filled } = drainage(topo, elevation, sea, rain, cell_area);
 
     // 2. Lakes. A lake is a whole flooded basin, not the hexes a river
     // happens to cross: find each connected stretch of submerged ground and
@@ -203,7 +231,7 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     let fixed: Vec<bool> = level.iter().map(|l| l.is_finite()).collect();
     while let Some(Reverse((bits, i))) = queue.pop() {
         let i = i as usize;
-        let at = f64::from_bits(bits);
+        let at = unkey(bits);
         if at > level[i] {
             continue;
         }

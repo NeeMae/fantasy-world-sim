@@ -268,6 +268,20 @@ fn world_section(
         ));
         ui.end_row();
 
+        ui.label("Erosion").on_hover_text(
+            "How much rivers and weather have worn the land: young and sharp, or old and carved",
+        );
+        ui.add(egui::Slider::new(&mut settings.erosion, 0.0..=2.0).step_by(0.05).custom_formatter(|v, _| {
+            match v {
+                v if v < 0.05 => "None",
+                v if v < 0.7 => "Young",
+                v if v <= 1.3 => "Normal",
+                _ => "Ancient",
+            }
+            .to_string()
+        }));
+        ui.end_row();
+
         ui.label("Inland seas").on_hover_text("How many basins in the continents flood into enclosed seas");
         ui.add(egui::Slider::new(&mut settings.inland_seas, 0.0..=1.0).step_by(0.05).custom_formatter(
             |v, _| {

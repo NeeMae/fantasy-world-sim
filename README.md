@@ -34,7 +34,8 @@ App controls:
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
-| M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Plates |
+| Ctrl+S | Save the world (see the Saves panel to name and load saves) |
+| M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Currents, Plates |
 | Space, 1–5 | Pause/resume, speed |
 
 The World panel generates a new world from:
@@ -48,22 +49,41 @@ The World panel generates a new world from:
 | Edges | *Open*: land runs off the map. *Ocean*: the world is ringed by sea |
 | Wrap | East–west wrapping, for a globe you can pan around forever |
 | Climate | *Regional* (cool north, warm south) or *Globe* (pole to pole) |
+| Sea level | How much of the map lies under the sea |
+| Temperature | From an ice age to a hothouse world |
+| Rainfall | From arid to drenched |
+| Mountains | How much mountain building the plates do |
+| Erosion | How much rivers have worn the land: young and sharp to ancient and carved |
+| Inland seas | How many basins sink into the continents and flood into enclosed seas |
+| Volatility | How turbulent history will be (used from Phase 2) |
+
+Worlds are saved to `fantasy-world-sim/saves` in your user data folder
+(`~/.local/share` on Linux, `%APPDATA%` on Windows, `~/Library/Application
+Support` on macOS); set `FWS_SAVES` to use another folder. A save holds the
+world, its history and the settings that made it.
 
 `sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
-`--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`),
-`--volatility`, `--view terrain|elevation|rainfall|temperature|fertility|plates`
-for `--png`, and `--names N` to print sample names for every culture.
+`--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`,
+`--ocean`, `--temperature`, `--rainfall`, `--mountains`, `--erosion`,
+`--inland-seas`, `--volatility`), `--view
+terrain|elevation|rainfall|temperature|fertility|currents|plates` for `--png`,
+`--save FILE` / `--load FILE`, and `--names N` to print sample names for every
+culture.
 
 Mountains come from plate tectonics: colliding plates raise ranges (with
-trenches offshore and island arcs at sea), separating plates open rifts, and
-microplates add hill country. The Plates view shows the plates, with
+trenches offshore and chains of volcanic islands at sea), separating plates
+open rifts, and microplates add hill country. Erosion then carves river
+valleys into the ranges and silts up basins. The Plates view shows the plates, with
 boundaries tinted red where they collide and blue where they pull apart.
 
 Rainfall is simulated after Dwarf Fortress: prevailing winds (trade winds,
 westerlies, polar easterlies) carry moisture from warm seas inland, rain it
 out steadily, and dump most of it on the windward side of mountains,
 leaving rain shadows behind them. Latitude bands make the equator wet and
-the subtropics dry.
+the subtropics dry. Ocean currents circle each ocean basin: warm along its
+western side and cold along its eastern side in the subtropics (so west
+coasts there run dry, like the Atacama), reversed further poleward (a warm
+drift for north-west coasts, like Europe). The Currents view shows them.
 
 Rivers come from that rainfall: sinks are filled so everything drains to
 the sea (or off an open edge), water gathers downhill into rivers, and

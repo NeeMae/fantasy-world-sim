@@ -20,6 +20,7 @@ use tectonics::{PlateLayer, smoothstep};
 
 mod climate;
 mod currents;
+mod erosion;
 mod hydrology;
 mod seas;
 mod tectonics;
@@ -70,6 +71,9 @@ pub struct WorldGenParams {
     /// How deeply basins sink into continental interiors, 0..1: higher
     /// values flood more of them into inland seas.
     pub inland_seas: f64,
+    /// How much rivers and weather wear the land down: 0 none, 1 normal,
+    /// 2 ancient, deeply carved land.
+    pub erosion: f64,
 }
 
 /// How the map maps onto the planet's climate bands.
@@ -104,6 +108,7 @@ impl Default for WorldGenParams {
             rainfall: 1.0,
             mountains: 1.0,
             inland_seas: 0.3,
+            erosion: 1.0,
         }
     }
 }
@@ -118,6 +123,75 @@ pub enum WorldGenError {
     Empty,
     #[error("world size must be positive (got {0})")]
     BadWorldSize(f64),
+}
+
+/// Rows in the fixed-resolution copy of the world that erosion works on.
+const EROSION_ROWS: u32 = 160;
+/// Raw depth of cutting at which a valley floor stops being rugged.
+const VALLEY_DEPTH: f64 = 0.08;
+
+/// Erodes a coarse copy of the world; returns its topology, how much each
+/// of its hexes rose (negative where cut down) and its eroded heights.
+fn erosion_delta(
+    params: &WorldGenParams,
+    layers: &Layers,
+    sea_share: f64,
+) -> Option<(Topology, Vec<f32>, Vec<f32>)> {
+    if params.erosion <= 0.0 {
+        return None;
+    }
+    let rows = EROSION_ROWS;
+    let mut cols = ((params.width as f64 * rows as f64 / params.height as f64).round() as u32).max(2);
+    if params.wrap == Wrap::X {
+        cols += cols & 1;
+    }
+    let coarse = Topology::new(cols, rows, params.wrap);
+    let coarse_params = WorldGenParams { width: cols, height: rows, ..params.clone() };
+    let before: Vec<f32> = (0..coarse.len() as u32)
+        .into_par_iter()
+        .map(|i| sample(&coarse, layers, &coarse_params, sim_core::HexId(i)).elevation)
+        .collect();
+    let coast = {
+        let mut sorted = before.clone();
+        sorted.sort_unstable_by(f32::total_cmp);
+        sorted[((sorted.len() - 1) as f64 * sea_share) as usize]
+    };
+    let row_step = params.world_size / rows as f64;
+    let column_step = 0.75 / (3f64.sqrt() / 2.0) * row_step;
+    let mut after = before.clone();
+    erosion::erode(&coarse, &mut after, coast, column_step * row_step, row_step, params.erosion);
+    let delta = after.iter().zip(&before).map(|(a, b)| a - b).collect();
+    Some((coarse, delta, after))
+}
+
+/// Interpolates a per-hex field from one grid onto another covering the
+/// same area.
+fn upsample(from: &Topology, values: &[f32], to: &Topology) -> Vec<f32> {
+    let (fw, fh) = (from.width() as i32, from.height() as i32);
+    let scale = from.height() as f64 / to.height() as f64;
+    let wraps = from.wrap() == Wrap::X;
+    let at = |c: i32, r: i32| {
+        let c = if wraps { c.rem_euclid(fw) } else { c.clamp(0, fw - 1) };
+        values[from.at(c, r.clamp(0, fh - 1)).expect("clamped").index()]
+    };
+    // A column's value at fractional row `y` (odd columns sit half a row lower).
+    let column = |c: i32, y: f64| {
+        let y = y - if c.rem_euclid(2) == 1 { 0.5 } else { 0.0 };
+        let r = y.floor();
+        let t = (y - r) as f32;
+        at(c, r as i32) * (1.0 - t) + at(c, r as i32 + 1) * t
+    };
+    (0..to.len() as u32)
+        .into_par_iter()
+        .map(|i| {
+            let (col, row) = to.offset(sim_core::HexId(i));
+            let x = col as f64 * scale;
+            let y = (row as f64 + if col & 1 == 1 { 0.5 } else { 0.0 }) * scale;
+            let c = x.floor();
+            let t = (x - c) as f32;
+            column(c as i32, y) * (1.0 - t) + column(c as i32 + 1, y) * t
+        })
+        .collect()
 }
 
 /// How far inland (noise-space units) a coast feels the current offshore.
@@ -321,8 +395,31 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     // Latitude from the climate bands, before altitude cooling.
     let latitude: Vec<f32> = terrain.temperature.iter().map(|w| 90.0 * (1.0 - w.clamp(0.0, 1.0))).collect();
 
-    to_percentiles(&mut terrain.elevation);
     let sea_level = registry.sea_level();
+    let column_step = 0.75 / (3f64.sqrt() / 2.0) / params.height as f64 * params.world_size;
+    let row_step = params.world_size / params.height as f64;
+
+    // Wear the land down. Erosion runs on a copy of the world at a fixed
+    // resolution, so it carves the same valleys at every scale, and the
+    // change is blended onto the map. Where it cut deep, a range is broken
+    // into separate ridges by its valleys.
+    let share = params.ocean.unwrap_or(sea_level as f64).clamp(0.0, 1.0);
+    let carved = erosion_delta(params, &layers, share);
+    if let Some((coarse, delta, after)) = &carved {
+        let delta = upsample(coarse, delta, &topology);
+        let after = upsample(coarse, after, &topology);
+        for i in 0..terrain.len() {
+            let e = terrain.elevation[i];
+            // Cut down by the coarse cut, but never below the coarse eroded
+            // surface: detail too fine for the coarse copy (the foot of a
+            // cliff) isn't dug out by cutting meant for the slope above.
+            let new = if delta[i] < 0.0 { e.min((e + delta[i]).max(after[i])) } else { e + delta[i] };
+            terrain.elevation[i] = new;
+            terrain.ruggedness[i] *= 1.0 - smoothstep(0.0, VALLEY_DEPTH, (e - new) as f64) as f32 * 0.85;
+        }
+    }
+
+    to_percentiles(&mut terrain.elevation);
     if let Some(ocean) = params.ocean {
         // Stretch the ranks so the chosen share of the map falls below the
         // content's sea level, keeping biome elevation bands meaningful.
@@ -357,8 +454,6 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 
     // Ocean currents warm or chill the sea, and with it the coasts nearby
     // (and so how much rain the air off that sea carries inland).
-    let column_step = 0.75 / (3f64.sqrt() / 2.0) / params.height as f64 * params.world_size;
-    let row_step = params.world_size / params.height as f64;
     let current = currents::anomaly(&topology, &sea, &latitude, column_step, row_step);
     terrain.current = current.clone();
     let reach = |step: f64| ((COAST_REACH / step).round() as i32).max(1);

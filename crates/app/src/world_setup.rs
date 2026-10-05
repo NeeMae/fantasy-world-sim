@@ -66,6 +66,8 @@ pub struct WorldSettings {
     pub mountains: f64,
     /// How deeply basins sink into continents, 0..1.
     pub inland_seas: f64,
+    /// Erosion strength, 0..2.
+    pub erosion: f64,
 }
 
 impl Default for WorldSettings {
@@ -86,6 +88,7 @@ impl Default for WorldSettings {
             rainfall: 1.0,
             mountains: 1.0,
             inland_seas: 0.3,
+            erosion: 1.0,
         }
     }
 }
@@ -124,6 +127,7 @@ impl WorldSettings {
             rainfall: self.rainfall,
             mountains: self.mountains,
             inland_seas: self.inland_seas,
+            erosion: self.erosion,
         })
     }
 }
