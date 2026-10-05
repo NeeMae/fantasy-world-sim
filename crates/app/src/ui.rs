@@ -268,6 +268,20 @@ fn world_section(
         ));
         ui.end_row();
 
+        ui.label("Inland seas").on_hover_text("How many basins in the continents flood into enclosed seas");
+        ui.add(egui::Slider::new(&mut settings.inland_seas, 0.0..=1.0).step_by(0.05).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < 0.05 => "None",
+                    v if v < 0.35 => "Few",
+                    v if v < 0.7 => "Some",
+                    _ => "Many",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
+
         ui.label("Climate");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut settings.climate, Climate::Regional, "Regional")

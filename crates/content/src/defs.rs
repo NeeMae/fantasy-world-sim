@@ -41,6 +41,11 @@ pub struct BiomeDef {
     /// other hexes never do.
     #[serde(default)]
     pub lake: bool,
+    /// Whether the biome is for inland seas: bodies of sea cut off from the
+    /// open ocean. Inland sea hexes prefer inland biomes, and take an
+    /// ordinary sea biome if none match; other hexes never take them.
+    #[serde(default)]
+    pub inland: bool,
     #[serde(default)]
     pub elevation: Range,
     #[serde(default)]
@@ -77,6 +82,7 @@ pub struct Site {
     pub relief: ReliefId,
     pub massif: f32,
     pub lake: bool,
+    pub inland: bool,
 }
 
 impl BiomeDef {
@@ -86,6 +92,7 @@ impl BiomeDef {
             && self.temperature.contains(site.temperature)
             && self.massif.contains(site.massif)
             && self.lake == site.lake
+            && self.inland == site.inland
             && (self.relief_ids.is_empty() || self.relief_ids.contains(&site.relief))
     }
 }

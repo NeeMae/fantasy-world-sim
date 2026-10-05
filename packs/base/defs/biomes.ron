@@ -33,6 +33,13 @@
         (id: "sea_ice", parent: "water_base", name: "Sea Ice", color: "#c9dbe6", travel_cost: 4.0,
             temperature: (0.0, 0.07), priority: 5),
 
+        // Inland seas: bodies of sea cut off from the open ocean (see `inland`).
+        // When frozen they fall back to Sea Ice.
+        (id: "inland_sea", parent: "water_base", name: "Inland Sea", color: "#24577a", inland: true,
+            elevation: (0.0, 0.5), temperature: (0.07, 1.0)),
+        (id: "inland_shallows", parent: "water_base", name: "Inland Shallows", color: "#3a7898", inland: true,
+            elevation: (0.5, 0.55), temperature: (0.07, 1.0)),
+
         // Lakes form in basins that rivers keep filled (see `lake`).
         (id: "lake", name: "Lake", color: "#3d77b4", water: true, lake: true, travel_cost: 2.0),
         (id: "frozen_lake", name: "Frozen Lake", color: "#d2e2ec", water: true, lake: true, travel_cost: 2.0,

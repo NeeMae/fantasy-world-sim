@@ -64,6 +64,8 @@ pub struct WorldSettings {
     pub rainfall: f64,
     /// Mountain-building multiplier.
     pub mountains: f64,
+    /// How deeply basins sink into continents, 0..1.
+    pub inland_seas: f64,
 }
 
 impl Default for WorldSettings {
@@ -83,6 +85,7 @@ impl Default for WorldSettings {
             temperature: 0.0,
             rainfall: 1.0,
             mountains: 1.0,
+            inland_seas: 0.3,
         }
     }
 }
@@ -120,6 +123,7 @@ impl WorldSettings {
             temperature: self.temperature,
             rainfall: self.rainfall,
             mountains: self.mountains,
+            inland_seas: self.inland_seas,
         })
     }
 }

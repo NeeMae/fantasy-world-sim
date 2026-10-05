@@ -51,6 +51,9 @@ struct Args {
     /// Rainfall multiplier: above 1 wetter, below 1 drier.
     #[arg(long, default_value_t = 1.0)]
     rainfall: f64,
+    /// How deeply basins sink into continents, flooding as inland seas, 0..1.
+    #[arg(long, default_value_t = 0.3)]
+    inland_seas: f64,
     /// Mountain-building multiplier: 0 worn flat, 2 jagged.
     #[arg(long, default_value_t = 1.0)]
     mountains: f64,
@@ -174,6 +177,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         temperature: args.temperature,
         rainfall: args.rainfall,
         mountains: args.mountains,
+        inland_seas: args.inland_seas,
         rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
         latitudes: match (args.climate, args.shape) {
             (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,

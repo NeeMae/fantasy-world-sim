@@ -21,6 +21,7 @@ use tectonics::{PlateLayer, smoothstep};
 mod climate;
 mod currents;
 mod hydrology;
+mod seas;
 mod tectonics;
 
 /// What happens at the map's edges.
@@ -66,6 +67,9 @@ pub struct WorldGenParams {
     /// Scales tectonic mountain building: 0 is worn-down, gentle land, 2 is
     /// young and jagged.
     pub mountains: f64,
+    /// How deeply basins sink into continental interiors, 0..1: higher
+    /// values flood more of them into inland seas.
+    pub inland_seas: f64,
 }
 
 /// How the map maps onto the planet's climate bands.
@@ -99,6 +103,7 @@ impl Default for WorldGenParams {
             temperature: 0.0,
             rainfall: 1.0,
             mountains: 1.0,
+            inland_seas: 0.3,
         }
     }
 }
@@ -137,12 +142,15 @@ struct Layers {
     moisture: Fbm<Perlin>,
     /// Wobbles climate bands so they don't follow lines of latitude exactly.
     climate: Fbm<Perlin>,
+    /// Basins sinking into continental interiors (inland seas).
+    basins: Fbm<Perlin>,
     /// Where ocean-floor mountain building breaks the surface as islands.
     volcanoes: tectonics::Volcanoes,
     major_plates: PlateLayer,
     minor_plates: PlateLayer,
     continent_scale: f64,
     mountains: f64,
+    inland_seas: f64,
 }
 
 /// The land at one point, before normalisation.
@@ -190,6 +198,8 @@ impl Layers {
             minor_plates,
             continent_scale,
             mountains: params.mountains.max(0.0),
+            inland_seas: params.inland_seas.clamp(0.0, 1.0),
+            basins: Fbm::<Perlin>::new(layer_seed(8)).set_octaves(2).set_frequency(1.7 / continent_scale),
         }
     }
 
@@ -218,7 +228,17 @@ impl Layers {
         let detail = self.detail.get(q);
         // Ridged noise is ~[-1, 1]; as 0..1 it carves uplift into crests.
         let crest = ((self.ridges.get(q) + 1.0) / 2.0).clamp(0.0, 1.0);
-        let elevation = crust(q) * 0.6 + detail * 0.18 + t.uplift + t.orogeny * (0.55 + 0.45 * crest);
+        // Basins sag into the interiors of continents, away from their
+        // coasts, deep enough to flood: the Caspian, the Black Sea.
+        let interior = smoothstep(0.05, 0.3, crust(q));
+        // The setting widens how much of the interior sags, and deepens it.
+        let s = self.inland_seas;
+        let basin = if s <= 0.0 {
+            0.0
+        } else {
+            smoothstep(0.5 - 0.45 * s, 0.8 - 0.4 * s, self.basins.get(q)) * interior * (0.3 + 0.3 * s)
+        };
+        let elevation = crust(q) * 0.6 + detail * 0.18 + t.uplift + t.orogeny * (0.55 + 0.45 * crest) - basin;
         // Rugged ground follows the crests, so uplift reads as ridgelines
         // with gentler ground between rather than solid massifs.
         let ruggedness = (t.orogeny * (0.2 + 0.8 * crest * crest) * 1.5 + detail.abs() * 0.1).clamp(0.0, 1.0);
@@ -316,6 +336,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         }
     }
     let sea: Vec<bool> = terrain.elevation.iter().map(|&e| e < sea_level).collect();
+    let inland = seas::inland(&topology, &sea, params.edges == EdgeStyle::Open);
     for (i, &is_sea) in sea.iter().enumerate() {
         if is_sea {
             // Relief and ranges belong to land; seas are flat.
@@ -419,6 +440,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
                     relief: t.relief[i],
                     massif: t.massif[i],
                     lake: water.lake[i],
+                    inland: inland[i],
                 },
             )
         })
@@ -531,7 +553,8 @@ fn choose_relief(registry: &Registry, r: f32) -> ReliefId {
 
 /// The highest-priority biome matching the site; the first biome if none
 /// match. A lake with no lake biome in the content takes the biome the
-/// land there would have had.
+/// land there would have had; an inland sea with no inland biome, an
+/// ordinary sea biome.
 fn choose_biome(registry: &Registry, site: Site) -> BiomeId {
     let best = |site: Site| {
         registry
@@ -544,7 +567,10 @@ fn choose_biome(registry: &Registry, site: Site) -> BiomeId {
             .max_by_key(|(_, b)| b.priority)
             .map(|(i, _)| BiomeId(i as u16))
     };
-    best(site).or_else(|| site.lake.then(|| best(Site { lake: false, ..site })).flatten()).unwrap_or_default()
+    best(site)
+        .or_else(|| site.lake.then(|| best(Site { lake: false, ..site })).flatten())
+        .or_else(|| site.inland.then(|| best(Site { inland: false, ..site })).flatten())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -663,6 +689,7 @@ mod tests {
             relief: content::ReliefId(0),
             massif: 0.0,
             lake: false,
+            inland: false,
         };
         assert_eq!(choose_biome(&reg, site(0.9, 0.05)), reg.biome_id("snow").unwrap());
         assert_eq!(choose_biome(&reg, site(0.9, 0.5)), reg.biome_id("land").unwrap());
@@ -688,6 +715,7 @@ mod tests {
             relief,
             massif,
             lake: false,
+            inland: false,
         };
         let forest = reg.biome_id("forest").unwrap();
         let alpine = reg.biome_id("alpine").unwrap();
