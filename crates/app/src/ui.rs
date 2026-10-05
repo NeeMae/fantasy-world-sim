@@ -61,6 +61,7 @@ pub fn panels(
                 (MapMode::Rainfall, "Rainfall"),
                 (MapMode::Temperature, "Temperature"),
                 (MapMode::Fertility, "Fertility"),
+                (MapMode::Currents, "Currents"),
                 (MapMode::Plates, "Plates"),
             ] {
                 ui.selectable_value(&mut map_mode.0, mode, label).on_hover_text("M cycles map views");
@@ -503,7 +504,8 @@ pub fn hotkeys(
             MapMode::Elevation => MapMode::Rainfall,
             MapMode::Rainfall => MapMode::Temperature,
             MapMode::Temperature => MapMode::Fertility,
-            MapMode::Fertility => MapMode::Plates,
+            MapMode::Fertility => MapMode::Currents,
+            MapMode::Currents => MapMode::Plates,
             MapMode::Plates => MapMode::Terrain,
         };
     }

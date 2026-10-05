@@ -25,6 +25,9 @@ pub struct Terrain {
     /// Water flowing out of each hex: its catchment's rainfall × area.
     /// At [`RIVER_DISCHARGE`] and above it's a river.
     pub discharge: Vec<f32>,
+    /// Ocean currents: sea-surface temperature anomaly, about −1 (a cold
+    /// current) to +1 (a warm one); 0 on land.
+    pub current: Vec<f32>,
 }
 
 /// [`Terrain::drain`] for water that leaves the land.
@@ -45,6 +48,7 @@ impl Terrain {
             relief: vec![ReliefId::default(); len],
             drain: vec![NO_DRAIN; len],
             discharge: vec![0.0; len],
+            current: vec![0.0; len],
         }
     }
 
@@ -154,8 +158,15 @@ impl World {
         h.u64(self.terrain_revision);
         h.u64(self.rules.volatility.to_bits() as u64);
         let t = &self.terrain;
-        for v in
-            t.elevation.iter().chain(&t.moisture).chain(&t.temperature).chain(&t.ruggedness).chain(&t.massif)
+        for v in t
+            .elevation
+            .iter()
+            .chain(&t.moisture)
+            .chain(&t.temperature)
+            .chain(&t.ruggedness)
+            .chain(&t.massif)
+            .chain(&t.discharge)
+            .chain(&t.current)
         {
             h.u64(v.to_bits() as u64);
         }

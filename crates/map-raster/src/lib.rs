@@ -82,6 +82,8 @@ pub enum MapMode {
     Temperature,
     /// How well the land feeds people.
     Fertility,
+    /// Ocean currents: warm in red, cold in blue.
+    Currents,
 }
 
 impl Default for RenderOptions {
@@ -222,6 +224,23 @@ pub fn render_rect(world: &World, registry: &Registry, opts: &RenderOptions, rec
                         world.terrain.temperature[i],
                     );
                     if biome.water { c.scale(0.55) } else { c }
+                }
+                MapMode::Currents => {
+                    if biome.water {
+                        ramp(
+                            &[
+                                (-1.0, Rgb(40, 110, 220)),
+                                (-0.3, Rgb(45, 75, 130)),
+                                (0.0, Rgb(38, 48, 72)),
+                                (0.3, Rgb(130, 60, 70)),
+                                (1.0, Rgb(230, 80, 50)),
+                            ],
+                            world.terrain.current[i],
+                        )
+                    } else {
+                        let t = world.terrain.temperature[i];
+                        Rgb(70, 72, 66).scale(0.8 + 0.5 * t)
+                    }
                 }
                 MapMode::Plates => {
                     let g = &world.geology;

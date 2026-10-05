@@ -171,7 +171,7 @@ fn sweep(input: &ClimateInput, ids: &[usize], eastward: bool) -> Vec<f32> {
 
 /// Averages each hex with the hexes up to `dc` columns east and west, or
 /// `dr` rows north and south (wrapping east-west where the map does).
-fn blur(topo: &Topology, values: &[f32], dc: i32, dr: i32) -> Vec<f32> {
+pub(crate) fn blur(topo: &Topology, values: &[f32], dc: i32, dr: i32) -> Vec<f32> {
     (0..topo.len() as u32)
         .into_par_iter()
         .map(|i| {

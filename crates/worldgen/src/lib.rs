@@ -19,6 +19,7 @@ use sim_core::{Geology, Plate, Terrain, Topology, World, Wrap, rng};
 use tectonics::{PlateLayer, smoothstep};
 
 mod climate;
+mod currents;
 mod hydrology;
 mod tectonics;
 
@@ -113,6 +114,9 @@ pub enum WorldGenError {
     #[error("world size must be positive (got {0})")]
     BadWorldSize(f64),
 }
+
+/// How far inland (noise-space units) a coast feels the current offshore.
+const COAST_REACH: f64 = 0.06;
 
 /// Independent noise layers, each seeded from the world seed.
 struct Layers {
@@ -330,6 +334,23 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     }
     terrain.relief = terrain.ruggedness.iter().map(|&r| choose_relief(registry, r)).collect();
 
+    // Ocean currents warm or chill the sea, and with it the coasts nearby
+    // (and so how much rain the air off that sea carries inland).
+    let column_step = 0.75 / (3f64.sqrt() / 2.0) / params.height as f64 * params.world_size;
+    let row_step = params.world_size / params.height as f64;
+    let current = currents::anomaly(&topology, &sea, &latitude, column_step, row_step);
+    terrain.current = current.clone();
+    let reach = |step: f64| ((COAST_REACH / step).round() as i32).max(1);
+    let mut coastal = current.clone();
+    for _ in 0..2 {
+        coastal = climate::blur(&topology, &coastal, reach(column_step), 0);
+        coastal = climate::blur(&topology, &coastal, 0, reach(row_step));
+    }
+    for i in 0..terrain.len() {
+        let shift = if sea[i] { 0.15 * current[i] } else { 0.3 * coastal[i] };
+        terrain.temperature[i] = (terrain.temperature[i] + shift).clamp(0.0, 1.0);
+    }
+
     // Rainfall from prevailing winds, wrung out by mountains.
     let height: Vec<f32> = (0..terrain.len())
         .map(|i| {
@@ -340,7 +361,6 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
             }
         })
         .collect();
-    let column_step = 0.75 / (3f64.sqrt() / 2.0) / params.height as f64 * params.world_size;
     let rain = climate::rainfall(&climate::ClimateInput {
         topology: &topology,
         sea: &sea,
@@ -348,13 +368,12 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         latitude: &latitude,
         temperature: &terrain.temperature,
         column_step,
-        row_step: params.world_size / params.height as f64,
+        row_step,
     });
 
     let rain: Vec<f32> = rain.iter().map(|r| r * params.rainfall.max(0.0) as f32).collect();
 
     // Rivers and lakes from that rainfall.
-    let row_step = params.world_size / params.height as f64;
     let water = hydrology::compute(&topology, &terrain.elevation, &sea, &rain, column_step * row_step);
     terrain.drain = water.drain;
     terrain.discharge = water.discharge;

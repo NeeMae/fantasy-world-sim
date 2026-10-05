@@ -105,6 +105,8 @@ enum View {
     Temperature,
     /// Fertility.
     Fertility,
+    /// Ocean currents.
+    Currents,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -223,6 +225,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             View::Rainfall => MapMode::Rainfall,
             View::Temperature => MapMode::Temperature,
             View::Fertility => MapMode::Fertility,
+            View::Currents => MapMode::Currents,
         };
         let opts = RenderOptions {
             layout: HexLayout { size: args.hex_size },
