@@ -199,6 +199,56 @@ fn pair(p: [f64; 3], a: &Site, b: &Site) -> Pair {
     Pair { x, foot, toward_hi, convergence }
 }
 
+/// Volcanic hot spots scattered over the sea floor: one jittered site per
+/// grid cell, some dormant. Where mountain building happens under open ocean
+/// (an island arc, a microplate ridge), each site near the boundary raises a
+/// round island, so arcs become chains of islands with open water between
+/// rather than unbroken lines of land.
+pub struct Volcanoes {
+    seed: u64,
+    /// Spacing of sites, in noise-space units.
+    cell: f64,
+    /// Island radius, in noise-space units.
+    radius: f64,
+    three_d: bool,
+}
+
+impl Volcanoes {
+    pub fn new(seed: u64, cell: f64, three_d: bool) -> Self {
+        Volcanoes { seed: rng::mix(seed, 2, 0, rng::purpose::WORLDGEN), cell, radius: cell * 0.38, three_d }
+    }
+
+    /// How strongly the sea floor at `p` rises as an island, 0..~1.3.
+    pub fn get(&self, p: [f64; 3]) -> f64 {
+        let base = p.map(|v| (v / self.cell).floor() as i32);
+        let z_range = if self.three_d { -1..=1 } else { 0..=0 };
+        let mut best: f64 = 0.0;
+        for dz in z_range {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let cell = [base[0] + dx, base[1] + dy, base[2] + dz];
+                    let key = |salt: u64| {
+                        let packed = (cell[0] as u32 as u64) | (cell[1] as u32 as u64) << 32;
+                        let h = rng::mix(self.seed, packed, cell[2] as u32 as u64, salt);
+                        (h >> 11) as f64 / (1u64 << 53) as f64
+                    };
+                    // About a third of sites are dormant; the rest vary in size.
+                    let strength = key(0);
+                    if strength < 0.35 {
+                        continue;
+                    }
+                    let jitter =
+                        |axis: usize, salt: u64| (cell[axis] as f64 + 0.1 + 0.8 * key(salt)) * self.cell;
+                    let site = [jitter(0, 1), jitter(1, 2), if self.three_d { jitter(2, 3) } else { 0.0 }];
+                    let r = self.radius * (0.6 + 0.6 * strength);
+                    best = best.max((0.8 + 0.5 * strength) * bell(dist2(p, site).sqrt() / r));
+                }
+            }
+        }
+        best
+    }
+}
+
 /// What the plates do to the land at one point.
 pub struct Tectonics {
     /// The major plate the point lies on.
@@ -231,17 +281,28 @@ fn bell(x: f64) -> f64 {
 /// probe points either side and blended softly. So every term is the same
 /// whichever plate the point is in, nothing switches abruptly, and the land
 /// has no cliffs, even where three plates meet.
+///
+/// `islands` is a 0..1 field of where the sea floor breaks the surface.
+/// Mountain building under open ocean (island arcs, microplate ridges) is
+/// scaled by it, so it rises as chains of separate islands rather than one
+/// unbroken line of land along the boundary.
 pub fn evaluate(
     major: &PlateLayer,
     minor: &PlateLayer,
     p: [f64; 3],
     crust: impl Fn([f64; 3]) -> f64,
+    islands: f64,
 ) -> Tectonics {
     let w = WIDTH;
     let continental = |x: [f64; 3]| smoothstep(-0.08, 0.08, crust(x));
+    // Mountains raised from ocean floor (or crust that's barely continental)
+    // only break the surface at volcanic islands.
+    let land_here = continental(p);
+    let surfaces = land_here + (1.0 - land_here) * islands;
     let mut uplift = 0.0;
     let mut orogeny = 0.0;
     let mut stress = 0.0;
+    let mut ridge = 0.0;
 
     let near = major.soft(p);
     for (i, (a, ma)) in near.iter().enumerate() {
@@ -276,15 +337,17 @@ pub fn evaluate(
                 o += lo_over_ocean * 0.7 * bell((x + 0.8 * w) / w);
                 u -= lo_over_ocean * 0.12 * bell((x - 0.3 * w) / (0.6 * w));
                 // Ocean meets ocean: the lower plate dives, the higher grows
-                // an island arc.
-                o += oceans * 0.55 * bell((x - 0.6 * w) / (0.7 * w));
+                // an island arc, broken into separate volcanic islands.
+                o += oceans * 0.6 * bell((x - 0.6 * w) / w);
                 u -= oceans * 0.1 * bell((x + 0.2 * w) / (0.6 * w));
                 orogeny += weight * c * o;
                 uplift += weight * c * u;
             } else {
-                // Pulling apart: a rift valley on land, a ridge under the sea.
+                // Pulling apart: a rift valley on land, a ridge under the sea
+                // (which only surfaces at hot spots, like Iceland).
                 let land = continental(pr.foot);
-                uplift += weight * c * (land * 0.1 * bell(x / (0.7 * w)) - (1.0 - land) * 0.08 * bell(x / w));
+                uplift += weight * c * land * 0.1 * bell(x / (0.7 * w));
+                ridge -= weight * c * (1.0 - land) * 0.08 * bell(x / w);
             }
             stress += weight * c * bell(x / (1.4 * w));
         }
@@ -292,7 +355,7 @@ pub fn evaluate(
 
     // Microplates: secondary ranges and old worn-down hill country, mostly
     // on continents (under open ocean they'd draw stray ridges).
-    let on_land = 0.25 + 0.75 * continental(p);
+    let on_land = 0.25 + 0.75 * land_here;
     let near_minor = minor.soft(p);
     for (i, (a, ma)) in near_minor.iter().enumerate() {
         for (b, mb) in &near_minor[i + 1..] {
@@ -312,7 +375,10 @@ pub fn evaluate(
         }
     }
 
-    Tectonics { plate: near[0].0, uplift, orogeny, stress }
+    // Under the sea a ridge lifts the floor everywhere, but only enough to
+    // matter at hot spots: elsewhere it stays well below the surface.
+    let uplift = uplift + ridge * (0.1 + 0.9 * islands.min(1.0)) * (1.0 - land_here) + ridge * land_here;
+    Tectonics { plate: near[0].0, uplift, orogeny: orogeny * surfaces, stress }
 }
 
 pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
@@ -381,7 +447,7 @@ mod continuity {
         let mut worst: f64 = 0.0;
         for i in 0..40_000 {
             let p = [i as f64 * step - 10.0, 0.37 + i as f64 * step * 0.31, 0.0];
-            let t = evaluate(&major, &minor, p, crust);
+            let t = evaluate(&major, &minor, p, crust, 1.0);
             let v = (t.uplift, t.orogeny);
             if let Some(pv) = prev {
                 worst = worst.max((v.0 - pv.0).abs()).max((v.1 - pv.1).abs());

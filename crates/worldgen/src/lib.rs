@@ -133,6 +133,8 @@ struct Layers {
     moisture: Fbm<Perlin>,
     /// Wobbles climate bands so they don't follow lines of latitude exactly.
     climate: Fbm<Perlin>,
+    /// Where ocean-floor mountain building breaks the surface as islands.
+    volcanoes: tectonics::Volcanoes,
     major_plates: PlateLayer,
     minor_plates: PlateLayer,
     continent_scale: f64,
@@ -179,6 +181,7 @@ impl Layers {
             plate_warp: Fbm::<Perlin>::new(layer_seed(6)).set_octaves(2).set_frequency(0.8 / continent_scale),
             moisture: Fbm::<Perlin>::new(layer_seed(1)).set_octaves(4).set_frequency(2.2),
             climate: Fbm::<Perlin>::new(layer_seed(2)).set_octaves(3).set_frequency(3.0),
+            volcanoes: tectonics::Volcanoes::new(seed, 0.09 * continent_scale.sqrt(), three_d),
             major_plates,
             minor_plates,
             continent_scale,
@@ -199,9 +202,14 @@ impl Layers {
         // see the same field (offset by the plate warp) to judge each side
         // of a boundary.
         let crust = |x: [f64; 3]| self.continents.get(x);
-        let t = tectonics::evaluate(&self.major_plates, &self.minor_plates, pq, |x| {
-            crust([x[0] - pq[0] + q[0], x[1] - pq[1] + q[1], x[2] - pq[2] + q[2]])
-        });
+        let islands = self.volcanoes.get(q);
+        let t = tectonics::evaluate(
+            &self.major_plates,
+            &self.minor_plates,
+            pq,
+            |x| crust([x[0] - pq[0] + q[0], x[1] - pq[1] + q[1], x[2] - pq[2] + q[2]]),
+            islands,
+        );
         let t = tectonics::Tectonics { orogeny: t.orogeny * self.mountains, ..t };
         let detail = self.detail.get(q);
         // Ridged noise is ~[-1, 1]; as 0..1 it carves uplift into crests.
