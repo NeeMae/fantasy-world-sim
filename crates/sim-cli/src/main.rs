@@ -42,6 +42,18 @@ struct Args {
     /// Size of landmasses: larger gives fewer, bigger continents.
     #[arg(long, default_value_t = 1.0)]
     continent_size: f64,
+    /// Share of the map under sea, 0..1 (default: the content's sea level).
+    #[arg(long)]
+    ocean: Option<f64>,
+    /// Temperature offset, about -0.3 (ice age) to 0.3 (hothouse).
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    temperature: f64,
+    /// Rainfall multiplier: above 1 wetter, below 1 drier.
+    #[arg(long, default_value_t = 1.0)]
+    rainfall: f64,
+    /// Mountain-building multiplier: 0 worn flat, 2 jagged.
+    #[arg(long, default_value_t = 1.0)]
+    mountains: f64,
     /// Climate bands across the map (default: regional, or globe for a cylinder).
     #[arg(long, value_enum)]
     climate: Option<Climate>,
@@ -156,6 +168,10 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
         world_size: args.world_size,
         continent_scale: args.continent_size,
+        ocean: args.ocean,
+        temperature: args.temperature,
+        rainfall: args.rainfall,
+        mountains: args.mountains,
         rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
         latitudes: match (args.climate, args.shape) {
             (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,

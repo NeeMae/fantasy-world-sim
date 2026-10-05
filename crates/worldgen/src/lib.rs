@@ -53,6 +53,18 @@ pub struct WorldGenParams {
     pub latitudes: Latitudes,
     /// World-wide rules stored in the world (e.g. volatility).
     pub rules: sim_core::WorldRules,
+    /// Share of the map under sea, 0..1. `None` uses the content's sea level
+    /// (the top of its water biomes' elevation range).
+    pub ocean: Option<f64>,
+    /// Added to every hex's temperature (0..1 scale): positive for a hotter
+    /// world, negative for an ice age.
+    pub temperature: f64,
+    /// Scales rainfall: above 1 is wetter (more forest, bigger rivers),
+    /// below 1 drier.
+    pub rainfall: f64,
+    /// Scales tectonic mountain building: 0 is worn-down, gentle land, 2 is
+    /// young and jagged.
+    pub mountains: f64,
 }
 
 /// How the map maps onto the planet's climate bands.
@@ -82,6 +94,10 @@ impl Default for WorldGenParams {
             continent_scale: 1.0,
             latitudes: Latitudes::default(),
             rules: sim_core::WorldRules::default(),
+            ocean: None,
+            temperature: 0.0,
+            rainfall: 1.0,
+            mountains: 1.0,
         }
     }
 }
@@ -120,6 +136,7 @@ struct Layers {
     major_plates: PlateLayer,
     minor_plates: PlateLayer,
     continent_scale: f64,
+    mountains: f64,
 }
 
 /// The land at one point, before normalisation.
@@ -165,6 +182,7 @@ impl Layers {
             major_plates,
             minor_plates,
             continent_scale,
+            mountains: params.mountains.max(0.0),
         }
     }
 
@@ -184,6 +202,7 @@ impl Layers {
         let t = tectonics::evaluate(&self.major_plates, &self.minor_plates, pq, |x| {
             crust([x[0] - pq[0] + q[0], x[1] - pq[1] + q[1], x[2] - pq[2] + q[2]])
         });
+        let t = tectonics::Tectonics { orogeny: t.orogeny * self.mountains, ..t };
         let detail = self.detail.get(q);
         // Ridged noise is ~[-1, 1]; as 0..1 it carves uplift into crests.
         let crest = ((self.ridges.get(q) + 1.0) / 2.0).clamp(0.0, 1.0);
@@ -272,6 +291,18 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 
     to_percentiles(&mut terrain.elevation);
     let sea_level = registry.sea_level();
+    if let Some(ocean) = params.ocean {
+        // Stretch the ranks so the chosen share of the map falls below the
+        // content's sea level, keeping biome elevation bands meaningful.
+        let s = ocean.clamp(0.01, 0.99) as f32;
+        for e in &mut terrain.elevation {
+            *e = if *e < s {
+                *e / s * sea_level
+            } else {
+                sea_level + (*e - s) / (1.0 - s) * (1.0 - sea_level)
+            };
+        }
+    }
     let sea: Vec<bool> = terrain.elevation.iter().map(|&e| e < sea_level).collect();
     for (i, &is_sea) in sea.iter().enumerate() {
         if is_sea {
@@ -287,7 +318,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     }
     // Higher and more rugged ground is colder, so ranges carry snow.
     for ((t, e), r) in terrain.temperature.iter_mut().zip(&terrain.elevation).zip(&terrain.ruggedness) {
-        *t = (*t - (e - 0.62).max(0.0) * 0.6 - r * 0.12).clamp(0.0, 1.0);
+        *t = (*t + params.temperature as f32 - (e - 0.62).max(0.0) * 0.6 - r * 0.12).clamp(0.0, 1.0);
     }
     terrain.relief = terrain.ruggedness.iter().map(|&r| choose_relief(registry, r)).collect();
 
@@ -311,6 +342,8 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         column_step,
         row_step: params.world_size / params.height as f64,
     });
+
+    let rain: Vec<f32> = rain.iter().map(|r| r * params.rainfall.max(0.0) as f32).collect();
 
     // Rivers and lakes from that rainfall.
     let row_step = params.world_size / params.height as f64;
@@ -339,6 +372,12 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     }
     terrain.moisture = wet;
     to_percentiles(&mut terrain.moisture);
+    // Moisture is ranked so biomes keep their shares whatever the climate;
+    // the rainfall setting then bends the ranks wetter or drier.
+    let bend = 1.0 / params.rainfall.clamp(0.1, 10.0) as f32;
+    for m in &mut terrain.moisture {
+        *m = m.powf(bend);
+    }
 
     terrain.biome = (0..terrain.len())
         .into_par_iter()

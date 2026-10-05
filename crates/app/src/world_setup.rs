@@ -56,6 +56,14 @@ pub struct WorldSettings {
     pub wrap: bool,
     pub climate: Climate,
     pub volatility: f32,
+    /// Share of the map under sea.
+    pub ocean: f64,
+    /// Temperature offset, about -0.3 (ice age) to 0.3 (hothouse).
+    pub temperature: f64,
+    /// Rainfall multiplier.
+    pub rainfall: f64,
+    /// Mountain-building multiplier.
+    pub mountains: f64,
 }
 
 impl Default for WorldSettings {
@@ -71,6 +79,10 @@ impl Default for WorldSettings {
             wrap: false,
             climate: Climate::Regional,
             volatility: 0.5,
+            ocean: 0.55,
+            temperature: 0.0,
+            rainfall: 1.0,
+            mountains: 1.0,
         }
     }
 }
@@ -104,6 +116,10 @@ impl WorldSettings {
                 Climate::Globe => Latitudes::Globe,
             },
             rules: sim_core::WorldRules { volatility: self.volatility },
+            ocean: Some(self.ocean),
+            temperature: self.temperature,
+            rainfall: self.rainfall,
+            mountains: self.mountains,
         })
     }
 }

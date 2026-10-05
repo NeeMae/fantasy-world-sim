@@ -214,6 +214,59 @@ fn world_section(
         }));
         ui.end_row();
 
+        ui.label("Sea level").on_hover_text("How much of the map lies under the sea");
+        ui.add(
+            egui::Slider::new(&mut settings.ocean, 0.2..=0.85)
+                .step_by(0.01)
+                .custom_formatter(|v, _| format!("{:.0}% sea", v * 100.0)),
+        );
+        ui.end_row();
+
+        ui.label("Temperature").on_hover_text("Warmer or colder than an Earth-like world");
+        ui.add(egui::Slider::new(&mut settings.temperature, -0.3..=0.3).step_by(0.01).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < -0.2 => "Ice age",
+                    v if v < -0.07 => "Cold",
+                    v if v <= 0.07 => "Temperate",
+                    v if v <= 0.2 => "Warm",
+                    _ => "Hothouse",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
+
+        ui.label("Rainfall").on_hover_text("Wetter worlds have more forest, swamp and bigger rivers");
+        ui.add(egui::Slider::new(&mut settings.rainfall, 0.3..=2.0).step_by(0.05).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < 0.55 => "Arid",
+                    v if v < 0.85 => "Dry",
+                    v if v <= 1.2 => "Normal",
+                    v if v <= 1.6 => "Wet",
+                    _ => "Drenched",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
+
+        ui.label("Mountains").on_hover_text("How much mountain building the plates do");
+        ui.add(egui::Slider::new(&mut settings.mountains, 0.0..=2.0).step_by(0.05).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < 0.35 => "Worn flat",
+                    v if v < 0.75 => "Gentle",
+                    v if v <= 1.25 => "Normal",
+                    v if v <= 1.65 => "Rugged",
+                    _ => "Jagged",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
+
         ui.label("Climate");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut settings.climate, Climate::Regional, "Regional")
