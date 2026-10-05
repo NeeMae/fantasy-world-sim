@@ -26,7 +26,7 @@ pub const MAX_CANVAS: u32 = 4096;
 pub const LARGE_WORLD: u64 = 1_000_000;
 
 /// Climate bands across the map.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Climate {
     /// Cool north to warm south, like a regional map.
     Regional,
@@ -38,8 +38,10 @@ pub enum Climate {
 #[derive(Resource)]
 pub struct Content(pub Arc<Registry>);
 
-/// The world-generation form in the UI.
-#[derive(Resource, Clone)]
+/// The world-generation form in the UI. Saved with each world (as RON), so
+/// loading a world restores the settings that made it.
+#[derive(Resource, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct WorldSettings {
     pub seed: String,
     /// Index into [`SCALES`].
@@ -132,10 +134,21 @@ pub fn start_world(
         "generated {}×{} world with seed {} (world size {}, wrap {})",
         params.width, params.height, params.seed, params.world_size, settings.wrap
     );
-    let size = map_view::spawn(commands, images, content.0.clone(), &world, mode);
+    Ok(show_world(commands, images, Simulation::new(world, content.0.clone()), mode))
+}
+
+/// Draws a simulation's world and starts running it, replacing any running
+/// world. Returns the map size in pixels.
+pub fn show_world(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    sim: Simulation,
+    mode: map_raster::MapMode,
+) -> Vec2 {
+    let size = map_view::spawn(commands, images, sim.registry().clone(), sim.world(), mode);
     // Replacing the resource drops the old handle, which stops the old thread.
-    commands.insert_resource(SimThread::spawn(Simulation::new(world, content.0.clone())));
-    Ok(size)
+    commands.insert_resource(SimThread::spawn(sim));
+    size
 }
 
 pub fn regenerate(
@@ -150,12 +163,16 @@ pub fn regenerate(
     mut camera: Query<(&Camera, &mut Transform, &mut Projection, &mut MapCamera)>,
     mut selection: ResMut<Selection>,
     mut hover: ResMut<Hover>,
+    mut saves: ResMut<crate::saves::SaveState>,
 ) {
     if requests.read().count() == 0 {
         return;
     }
     match start_world(&mut commands, &mut images, &content, &settings, mode.0) {
         Ok(size) => {
+            // A new world: don't let Ctrl+S overwrite the last one's save.
+            saves.name.clear();
+            saves.status = None;
             for entity in &old {
                 commands.entity(entity).despawn();
             }
@@ -166,4 +183,50 @@ pub fn regenerate(
         }
         Err(e) => error!("could not generate world: {e}"),
     }
+}
+
+/// Asks for a saved world to replace the current one.
+#[derive(Message)]
+pub struct LoadRequest(pub std::path::PathBuf);
+
+pub fn load(
+    mut requests: MessageReader<LoadRequest>,
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    content: Res<Content>,
+    mut settings: ResMut<WorldSettings>,
+    mut saves: ResMut<crate::saves::SaveState>,
+    mode: Res<MapModeSetting>,
+    old: Query<Entity, With<MapEntity>>,
+    windows: Query<&Window>,
+    mut camera: Query<(&Camera, &mut Transform, &mut Projection, &mut MapCamera)>,
+    mut selection: ResMut<Selection>,
+    mut hover: ResMut<Hover>,
+) {
+    let Some(LoadRequest(path)) = requests.read().last() else {
+        return;
+    };
+    let data = match sim_core::save::load(path, &content.0) {
+        Ok(data) => data,
+        Err(e) => {
+            saves.report(format!("Could not load {}: {e}", crate::saves::display_name(path)), false);
+            return;
+        }
+    };
+    // Settings from an older or newer build may not parse; keep the form.
+    if let Ok(saved) = ron::from_str::<WorldSettings>(&data.settings) {
+        *settings = saved;
+    }
+    let name = crate::saves::display_name(path);
+    saves.report(format!("Loaded {name}"), true);
+    saves.name = name;
+    let sim = Simulation::from_save(data, content.0.clone());
+    let size = show_world(&mut commands, &mut images, sim, mode.0);
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    selection.0 = None;
+    hover.0 = None;
+    let window = windows.single().map_or(Vec2::new(1600.0, 900.0), Window::size);
+    camera::refit(&mut camera, size, window);
 }

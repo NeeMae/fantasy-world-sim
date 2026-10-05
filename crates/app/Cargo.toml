@@ -18,6 +18,8 @@ names.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
 clap.workspace = true
+serde.workspace = true
+ron.workspace = true
 
 [lints]
 workspace = true

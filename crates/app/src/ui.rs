@@ -9,10 +9,11 @@ use sim_core::{Command, Date, Paint};
 use worldgen::EdgeStyle;
 
 use crate::map_view::MapView;
+use crate::saves::{self, SaveState};
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
 use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, PointerOverUi, Selection, Tool, ToolState};
 use crate::world_setup::{
-    ASPECTS, Climate, LARGE_WORLD, MAX_CANVAS, RegenerateRequest, SCALES, WorldSettings,
+    ASPECTS, Climate, LARGE_WORLD, LoadRequest, MAX_CANVAS, RegenerateRequest, SCALES, WorldSettings,
 };
 
 pub fn panels(
@@ -26,6 +27,8 @@ pub fn panels(
     mut regenerate: MessageWriter<RegenerateRequest>,
     mut over_ui: ResMut<PointerOverUi>,
     mut map_mode: ResMut<MapModeSetting>,
+    mut save_state: ResMut<SaveState>,
+    mut load: MessageWriter<LoadRequest>,
     // Bumped by "More names" so the samples change.
     mut name_draw: Local<u64>,
 ) -> Result {
@@ -83,6 +86,8 @@ pub fn panels(
         egui::ScrollArea::vertical().show(ui, |ui| {
             world_section(ui, &mut settings, &mut regenerate, world);
             ui.separator();
+            saves::section(ui, &mut save_state, &sim, &settings, &mut load);
+            ui.separator();
             tools_section(ui, &mut tools, &view, &sim, snap.undo_redo);
             ui.separator();
             inspector_section(ui, &selection, &view, world);
@@ -90,7 +95,7 @@ pub fn panels(
             peoples_section(ui, &view, world, &mut name_draw);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · Ctrl+S: save");
         });
     });
 
@@ -423,6 +428,8 @@ pub fn hotkeys(
     mut sim: ResMut<SimThread>,
     mut tools: ResMut<ToolState>,
     mut map_mode: ResMut<MapModeSetting>,
+    mut save_state: ResMut<SaveState>,
+    settings: Res<WorldSettings>,
 ) {
     if egui.wants_any_keyboard_input() {
         return;
@@ -469,5 +476,11 @@ pub fn hotkeys(
     }
     if ctrl && keys.just_pressed(KeyCode::KeyY) {
         sim.submit(Command::Redo);
+    }
+    if ctrl && keys.just_pressed(KeyCode::KeyS) {
+        if save_state.name.trim().is_empty() {
+            save_state.name = format!("World {}", sim.snapshot().world.seed);
+        }
+        save_state.save(&sim, &settings);
     }
 }

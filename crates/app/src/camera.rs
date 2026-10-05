@@ -86,8 +86,9 @@ pub fn controls(
         camera.viewport_to_world_2d(&GlobalTransform::from(*transform), screen).ok()
     };
 
-    // Keyboard pan.
-    if !egui.wants_any_keyboard_input() {
+    // Keyboard pan (not while Ctrl is down: Ctrl+S saves).
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if !egui.wants_any_keyboard_input() && !ctrl {
         let mut dir = Vec2::ZERO;
         for (keys_for, d) in [
             ([KeyCode::KeyW, KeyCode::ArrowUp], Vec2::Y),

@@ -16,6 +16,8 @@ names = { path = "crates/names" }
 
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+postcard = { version = "1", features = ["use-std"] }
+flate2 = "1"
 thiserror = "2"
 rand = "0.10"
 rand_chacha = "0.10"

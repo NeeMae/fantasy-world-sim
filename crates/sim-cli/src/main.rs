@@ -55,6 +55,13 @@ struct Args {
     /// (Default: the base pack, found in ./packs/base or next to the program.)
     #[arg(long = "pack")]
     packs: Vec<PathBuf>,
+    /// Start from a saved world instead of generating one (world options
+    /// are then ignored).
+    #[arg(long)]
+    load: Option<PathBuf>,
+    /// Save the world after simulating.
+    #[arg(long)]
+    save: Option<PathBuf>,
     /// Write a pixel-art image of the final map.
     #[arg(long)]
     png: Option<PathBuf>,
@@ -156,17 +163,24 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     let started = Instant::now();
-    let world = worldgen::generate(&params, &registry)?;
-    println!(
-        "worldgen: {}x{} hexes ({}) in {:.0?}",
-        args.width,
-        args.height,
-        world.topology.len(),
-        started.elapsed()
-    );
-    print_biomes(&world, &registry);
+    let mut sim = if let Some(path) = &args.load {
+        let sim = Simulation::from_save(sim_core::save::load(path, &registry)?, registry.clone());
+        let t = &sim.world().topology;
+        println!("loaded {} ({}x{} hexes, {})", path.display(), t.width(), t.height(), sim.world().date());
+        sim
+    } else {
+        let world = worldgen::generate(&params, &registry)?;
+        println!(
+            "worldgen: {}x{} hexes ({}) in {:.0?}",
+            args.width,
+            args.height,
+            world.topology.len(),
+            started.elapsed()
+        );
+        Simulation::new(world, registry.clone())
+    };
+    print_biomes(sim.world(), &registry);
 
-    let mut sim = Simulation::new(world, registry.clone());
     let ticks = args.ticks + args.years * sim_core::time::MONTHS_PER_YEAR;
     let started = Instant::now();
     sim.run(ticks);
@@ -178,6 +192,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("chronicle: {} entries", sim.chronicle().entries().len());
     println!("state hash: {:016x}", sim.world().state_hash());
+    if let Some(path) = &args.save {
+        let started = Instant::now();
+        sim_core::save::save(path, &sim.save_data(String::new()), &registry)?;
+        let size = std::fs::metadata(path).map_or(0, |m| m.len());
+        println!("saved {} ({:.1} MB) in {:.0?}", path.display(), size as f64 / 1e6, started.elapsed());
+    }
 
     if let Some(path) = args.png {
         let mode = match args.view {

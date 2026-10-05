@@ -23,7 +23,7 @@ mod hydrology;
 mod tectonics;
 
 /// What happens at the map's edges.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeStyle {
     /// The map is a window onto a larger world: land and sea run off the
     /// edges wherever the terrain takes them.

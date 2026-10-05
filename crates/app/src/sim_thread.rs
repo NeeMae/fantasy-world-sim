@@ -1,6 +1,7 @@
 //! Runs the simulation on its own thread so the window stays smooth at any
 //! sim speed. The view only ever reads the latest published [`Snapshot`].
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,6 +30,7 @@ pub const SPEEDS: [(&str, Speed); 6] = [
 enum Control {
     SetSpeed(Speed),
     Submit(Command),
+    Save { path: PathBuf, settings: String, reply: Sender<Result<PathBuf, String>> },
 }
 
 /// What the view sees of the simulation.
@@ -92,6 +94,14 @@ impl SimThread {
         let _ = self.control.send(Control::Submit(command));
     }
 
+    /// Saves the world as it stands between ticks. The file is written in
+    /// the background; the result arrives on the returned channel.
+    pub fn save(&self, path: PathBuf, settings: String) -> Receiver<Result<PathBuf, String>> {
+        let (reply, result) = mpsc::channel();
+        let _ = self.control.send(Control::Save { path, settings, reply });
+        result
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.shared.snapshot.lock().expect("simulation thread panicked").clone()
     }
@@ -128,9 +138,17 @@ fn run(sim: &mut Simulation, rx: &Receiver<Control>, shared: &Shared) {
                     match msg {
                         Control::Submit(cmd) => sim.submit(cmd),
                         Control::SetSpeed(s) => speed = s,
+                        Control::Save { path, settings, reply } => {
+                            sim.apply_pending();
+                            save(sim, path, settings, reply);
+                        }
                     }
                 }
                 sim.apply_pending();
+            }
+            Ok(Control::Save { path, settings, reply }) => {
+                sim.apply_pending();
+                save(sim, path, settings, reply);
             }
             Err(RecvTimeoutError::Timeout) => {
                 batch = match speed {
@@ -161,6 +179,17 @@ fn run(sim: &mut Simulation, rx: &Receiver<Control>, shared: &Shared) {
             (window_start, window_ticks) = (Instant::now(), 0);
         }
     }
+}
+
+/// Copies the state now and writes it on another thread, so a big world
+/// doesn't stall the simulation while it's compressed.
+fn save(sim: &Simulation, path: PathBuf, settings: String, reply: Sender<Result<PathBuf, String>>) {
+    let data = sim.save_data(settings);
+    let registry = sim.registry().clone();
+    thread::spawn(move || {
+        let result = sim_core::save::save(&path, &data, &registry).map(|()| path).map_err(|e| e.to_string());
+        let _ = reply.send(result);
+    });
 }
 
 fn publish(sim: &mut Simulation, shared: &Shared) {

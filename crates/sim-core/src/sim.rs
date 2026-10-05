@@ -55,6 +55,19 @@ impl Simulation {
         }
     }
 
+    /// Resumes a saved world. Its undo history isn't saved.
+    pub fn from_save(data: crate::SaveData, registry: Arc<Registry>) -> Self {
+        let mut sim = Simulation::new(data.world, registry);
+        sim.chronicle = data.chronicle;
+        sim
+    }
+
+    /// Everything needed to resume this world later. Pending commands
+    /// aren't included: apply them first.
+    pub fn save_data(&self, settings: String) -> crate::SaveData {
+        crate::SaveData { world: self.world.clone(), chronicle: self.chronicle.clone(), settings }
+    }
+
     pub fn world(&self) -> &World {
         &self.world
     }

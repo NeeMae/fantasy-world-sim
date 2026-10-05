@@ -8,6 +8,7 @@
 
 mod camera;
 mod map_view;
+mod saves;
 mod sim_thread;
 mod tools;
 mod ui;
@@ -22,7 +23,7 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 
 use tools::{Hover, MapModeSetting, PointerOverUi, Selection, ToolState};
-use world_setup::{Climate, Content, RegenerateRequest, SCALES, WorldSettings};
+use world_setup::{Climate, Content, LoadRequest, RegenerateRequest, SCALES, WorldSettings};
 
 #[derive(Parser)]
 #[command(version, about = "Fantasy world simulator")]
@@ -95,11 +96,15 @@ fn main() -> AppExit {
         .init_resource::<PointerOverUi>()
         .init_resource::<MapModeSetting>()
         .add_message::<RegenerateRequest>()
+        .add_message::<LoadRequest>()
+        .init_resource::<saves::SaveState>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 world_setup::regenerate,
+                world_setup::load,
+                saves::poll,
                 (camera::controls, ui::hotkeys),
                 tools::update_hover,
                 tools::use_tool,
