@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Zoomed out, the map no longer shows a checkerboard of lighter and darker
+  squares (or a grainy shimmer): map textures are now mipmapped.
+
 ## v0.2.0
 
 A big round of world generation: living land (rivers, lakes, cultures),
