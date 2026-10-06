@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use content::Registry;
@@ -65,7 +66,7 @@ impl MapView {
     fn redraw_chunk(&self, chunk: &Chunk, world: &World, images: &mut Assets<Image>) {
         let rgba = map_raster::render_rect(world, &self.registry, &self.options, chunk.rect);
         if let Some(mut image) = images.get_mut(&chunk.image) {
-            image.data = Some(rgba);
+            image.data = Some(with_mips(chunk.rect.width, chunk.rect.height, rgba));
         }
     }
 }
@@ -117,14 +118,79 @@ pub fn spawn(
     size
 }
 
+/// A chunk texture: crisp pixels when zoomed in, and mipmapped when zoomed
+/// out. Without mipmaps, zooming out samples a few scattered pixels of the
+/// fine pattern (hex edges, symbols), and since each chunk lines up with the
+/// screen differently, neighbouring chunks come out visibly lighter or
+/// darker: a checkerboard.
 fn make_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
-    Image::new(
-        Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+    let (width, height) = (width.max(1), height.max(1));
+    let rgba = if rgba.is_empty() { vec![0; 4] } else { rgba };
+    let mut image = Image::new(
+        Extent3d { width, height, depth_or_array_layers: 1 },
         TextureDimension::D2,
-        if rgba.is_empty() { vec![0; 4] } else { rgba },
+        rgba,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    )
+    );
+    // `Image::new` takes only the full-size level; add the rest after.
+    image.data = image.data.take().map(|base| with_mips(width, height, base));
+    image.texture_descriptor.mip_level_count = mip_levels(width, height);
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..ImageSamplerDescriptor::nearest()
+    });
+    image
+}
+
+fn mip_levels(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+/// `rgba` followed by each smaller mip level, halving down to 1×1. Pixels
+/// are averaged in linear light, so blending doesn't darken the map.
+fn with_mips(width: u32, height: u32, rgba: Vec<u8>) -> Vec<u8> {
+    let to_linear: Vec<f32> = (0..=255)
+        .map(|v| {
+            let c = v as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        })
+        .collect();
+    let to_srgb = |l: f32| {
+        let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+        (c * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    let mut out = rgba;
+    let (mut w, mut h, mut start) = (width as usize, height as usize, 0);
+    for _ in 1..mip_levels(width, height) {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = Vec::with_capacity(nw * nh * 4);
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut sum = [0.0f32; 4];
+                let mut count = 0.0;
+                for (sx, sy) in
+                    [(2 * x, 2 * y), (2 * x + 1, 2 * y), (2 * x, 2 * y + 1), (2 * x + 1, 2 * y + 1)]
+                {
+                    let (sx, sy) = (sx.min(w - 1), sy.min(h - 1));
+                    let p = start + (sy * w + sx) * 4;
+                    for c in 0..3 {
+                        sum[c] += to_linear[out[p + c] as usize];
+                    }
+                    sum[3] += out[p + 3] as f32;
+                    count += 1.0;
+                }
+                next.extend([to_srgb(sum[0] / count), to_srgb(sum[1] / count), to_srgb(sum[2] / count)]);
+                next.push((sum[3] / count).round() as u8);
+            }
+        }
+        start = out.len();
+        out.extend(next);
+        (w, h) = (nw, nh);
+    }
+    out
 }
 
 /// Switches the map view, redrawing every chunk.
