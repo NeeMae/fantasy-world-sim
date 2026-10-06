@@ -1,6 +1,6 @@
 (
     id: "base",
     name: "Base",
-    version: "0.1.0",
+    version: "0.2.0",
     description: "The default world. Other packs layer on top of this one.",
 )

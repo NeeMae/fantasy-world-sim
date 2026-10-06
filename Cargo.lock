@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "content"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ron",
  "serde",
@@ -3616,7 +3616,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "map-raster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "content",
  "rayon",
@@ -3723,7 +3723,7 @@ dependencies = [
 
 [[package]]
 name = "names"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "content",
  "rand 0.10.3",
@@ -4897,7 +4897,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sim-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "content",
@@ -4910,7 +4910,7 @@ dependencies = [
 
 [[package]]
 name = "sim-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "content",
  "flate2",
@@ -6426,7 +6426,7 @@ dependencies = [
 
 [[package]]
 name = "worldgen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "content",
  "noise",

@@ -23,10 +23,20 @@ Controls
   I / B                         inspect tool / paint tool
   [ / ]                         brush size
   Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y undo / redo
+  Ctrl+S                        save the world
   M                             cycle map views
   Space, 1-5                    pause, speed
 
 The World panel on the right generates new worlds: try World size,
-Continents, Wrap and Climate, then "Regenerate world".
+Continents, Wrap, Sea level, Temperature, Rainfall, Mountains, Erosion and
+Inland seas, then "Regenerate world".
+
+The Saves panel names, lists and loads saved worlds. Saves are kept in
+your user data folder, in fantasy-world-sim/saves:
+  Windows:  %APPDATA%\fantasy-world-sim\saves
+  macOS:    ~/Library/Application Support/fantasy-world-sim/saves
+  Linux:    ~/.local/share/fantasy-world-sim/saves
+
+See CHANGELOG.md for what's new.
 
 Found a bug? Note the seed (shown in the World panel) and what you did.
