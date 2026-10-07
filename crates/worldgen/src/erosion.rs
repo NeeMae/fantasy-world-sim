@@ -62,7 +62,7 @@ pub fn erode(
         // Drainage needs non-negative heights only for its own bookkeeping;
         // shifting doesn't change where water goes.
         let shifted: Vec<f32> = elevation.iter().map(|e| e - floor).collect();
-        let flow = hydrology::drainage(topo, &shifted, &sea, &rain, cell_area);
+        let flow = hydrology::drainage(topo, &shifted, &sea, &rain, cell_area, hydrology::Routing::default());
         let old = elevation.to_vec();
         let next: Vec<f32> = (0..n)
             .into_par_iter()

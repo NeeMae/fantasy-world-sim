@@ -54,6 +54,8 @@ The World panel generates a new world from:
 | Rainfall | From arid to drenched |
 | Mountains | How much mountain building the plates do |
 | Erosion | How much rivers have worn the land: young and sharp to ancient and carved |
+| Rivers | How many streams count as rivers: only the great rivers, or every sizeable stream |
+| Lakes | How big lakes grow before evaporation balances their inflow (none to big) |
 | Inland seas | How many basins sink into the continents and flood into enclosed seas |
 | Volatility | How turbulent history will be (used from Phase 2) |
 
@@ -65,7 +67,7 @@ world, its history and the settings that made it.
 `sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
 `--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`,
 `--ocean`, `--temperature`, `--rainfall`, `--mountains`, `--erosion`,
-`--inland-seas`, `--volatility`), `--view
+`--rivers`, `--lakes`, `--inland-seas`, `--volatility`), `--view
 terrain|elevation|rainfall|temperature|fertility|currents|plates` for `--png`,
 `--save FILE` / `--load FILE`, and `--names N` to print sample names for every
 culture.
@@ -85,9 +87,11 @@ western side and cold along its eastern side in the subtropics (so west
 coasts there run dry, like the Atacama), reversed further poleward (a warm
 drift for north-west coasts, like Europe). The Currents view shows them.
 
-Rivers come from that rainfall: sinks are filled so everything drains to
-the sea (or off an open edge), water gathers downhill into rivers, and
-basins that rivers keep filled become lakes. Rivers water their banks, so
+Rivers come from that rainfall: water gathers downhill into rivers, small
+streams turn to join bigger rivers beside them, and basins fill with lakes.
+A lake that fills its basin overflows and its river carries on to the sea;
+one that doesn't (too dry, like the Great Salt Lake) has no outlet, and the
+rivers feeding it end there. Rivers water their banks, so
 a river through a desert keeps a green floodplain.
 
 ## Layout

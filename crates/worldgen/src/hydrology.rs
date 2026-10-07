@@ -16,6 +16,8 @@
 //! any scale (finer hexes just trace them more closely).
 
 use std::cmp::Reverse;
+
+use rayon::prelude::*;
 use std::collections::BinaryHeap;
 
 use sim_core::{Axial, HexId, NO_DRAIN, RIVER_DISCHARGE, Topology, Wrap};
@@ -34,6 +36,8 @@ const LAKE_SHARE: f64 = 0.05;
 const SUBMERGED: f64 = 0.0003;
 /// A basin needs this share of a river's discharge flowing in to stay wet.
 const LAKE_INFLOW: f32 = 0.25;
+/// Rounds of rerouting streams to join bigger rivers beside them.
+const MERGE_ROUNDS: usize = 2;
 /// The smallest rise forced between a hex and the one it drains into, so
 /// filled flats still slope towards their outlet.
 const EPSILON: f64 = 1e-7;
@@ -71,7 +75,10 @@ pub struct Drainage {
     pub filled: Vec<f64>,
 }
 
-pub fn drainage(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], cell_area: f64) -> Drainage {
+/// `elevation` with every sink filled to its spill level (priority flood
+/// from the sea and the open edges; each fill slopes very slightly towards
+/// its outlet).
+pub fn fill(topo: &Topology, elevation: &[f32], sea: &[bool]) -> Vec<f64> {
     let n = topo.len();
     let (w, h) = (topo.width() as i32, topo.height() as i32);
     let on_edge = |id: HexId| {
@@ -112,24 +119,60 @@ pub fn drainage(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], 
         }
     }
 
+    filled
+}
+
+pub fn drainage(
+    topo: &Topology,
+    elevation: &[f32],
+    sea: &[bool],
+    rain: &[f32],
+    cell_area: f64,
+    routing: Routing,
+) -> Drainage {
+    let n = topo.len();
+    let filled = fill(topo, elevation, sea);
+
     // Each land hex drains to a neighbour lower on the filled surface, which
     // guarantees every path reaches an outlet. Among those it prefers the
     // biggest drop in the *original* ground: on open slopes that's the
     // steepest way down, and across filled basins it follows the old valley
     // floor instead of a dead-straight line to the outlet. Edge hexes with
     // no lower neighbour drain off the map.
-    let drain: Vec<u32> = (0..n)
-        .map(|i| if sea[i] { NO_DRAIN } else { downhill(topo, elevation, &filled, i, |_| true) })
-        .collect();
+    let route = |flow: Option<&[f32]>| -> Vec<u32> {
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                if sea[i] { NO_DRAIN } else { downhill(topo, elevation, &filled, i, |_| true, routing, flow) }
+            })
+            .collect()
+    };
+    let mut drain = route(None);
 
     // 3. Gather rain downhill.
-    let discharge = accumulate(&drain, sea, rain, cell_area);
+    let mut discharge = accumulate(&drain, sea, rain, cell_area);
+    // Streams beside bigger rivers turn to join them; once joined the river
+    // is bigger still, so a couple of rounds let tributaries gather.
+    if routing.merge > 0.0 {
+        for _ in 0..MERGE_ROUNDS {
+            drain = route(Some(&discharge));
+            discharge = accumulate(&drain, sea, rain, cell_area);
+        }
+    }
     Drainage { drain, discharge, filled }
 }
 
-pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], cell_area: f64) -> Hydrology {
+pub fn compute(
+    topo: &Topology,
+    elevation: &[f32],
+    sea: &[bool],
+    rain: &[f32],
+    cell_area: f64,
+    routing: Routing,
+    lakes: f64,
+) -> Hydrology {
     let n = topo.len();
-    let Drainage { mut drain, discharge, filled } = drainage(topo, elevation, sea, rain, cell_area);
+    let Drainage { mut drain, discharge, filled } = drainage(topo, elevation, sea, rain, cell_area, routing);
 
     // 2. Lakes. A lake is a whole flooded basin, not the hexes a river
     // happens to cross: find each connected stretch of submerged ground and
@@ -138,7 +181,11 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     let submerged = |i: usize| !sea[i] && filled[i] - elevation[i] as f64 > SUBMERGED;
     let mut lake = vec![false; n];
     let mut seen = vec![false; n];
+    // Each basin, and whether it's closed: its water never rises high
+    // enough to spill out, so it ends there, in a lake or a dry flat (the
+    // Great Salt Lake, the Caspian), rather than flowing on to the sea.
     let mut basins = Vec::new();
+    let mut closed = Vec::new();
     for start in 0..n {
         if seen[start] || !submerged(start) {
             continue;
@@ -160,14 +207,14 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
         basins.push(basin.clone());
         let depth = basin.iter().map(|&i| filled[i] - elevation[i] as f64).fold(0.0, f64::max);
         let outflow = basin.iter().map(|&i| discharge[i]).fold(0.0, f32::max);
-        if depth <= LAKE_DEPTH || outflow <= RIVER_DISCHARGE * LAKE_INFLOW {
-            continue;
-        }
         // The water rises from the basin's lowest point until evaporation
         // off its surface balances the water flowing in, or it spills.
         let catchment = outflow as f64 / cell_area;
-        let room = ((catchment * LAKE_SHARE) as usize).min(basin.len());
-        if room < MIN_LAKE {
+        let room = (catchment * LAKE_SHARE * lakes) as usize;
+        // Shallow dips are just roughness in the ground: water runs through.
+        closed.push(depth > LAKE_DEPTH && room < basin.len());
+        let room = room.min(basin.len());
+        if depth <= LAKE_DEPTH || outflow <= RIVER_DISCHARGE * LAKE_INFLOW || room < MIN_LAKE {
             continue;
         }
         let lowest =
@@ -205,13 +252,22 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     let mut rerouted = vec![false; n];
     let mut level = vec![f64::INFINITY; n];
     let mut queue = BinaryHeap::new();
-    for basin in &basins {
+    for (basin, &closed) in basins.iter().zip(&closed) {
         for &i in basin {
             rerouted[i] = true;
         }
         let mut sinks: Vec<usize> = basin.iter().copied().filter(|&i| lake[i]).collect();
         if sinks.is_empty() {
             sinks.extend(basin.iter().copied().min_by(|&a, &b| elevation[a].total_cmp(&elevation[b])));
+        }
+        if closed {
+            // Water ends here.
+            for &i in &sinks {
+                drain[i] = NO_DRAIN;
+                level[i] = elevation[i] as f64;
+                queue.push(key(level[i], i));
+            }
+            continue;
         }
         for start in sinks {
             // Follow the outflow until it leaves the basin. Drains only go
@@ -249,7 +305,7 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     }
     for i in 0..n {
         if rerouted[i] && !fixed[i] {
-            drain[i] = downhill(topo, elevation, &level, i, |j| rerouted[j]);
+            drain[i] = downhill(topo, elevation, &level, i, |j| rerouted[j], routing, Some(&discharge));
         }
     }
     let discharge = accumulate(&drain, sea, rain, cell_area);
@@ -257,25 +313,61 @@ pub fn compute(topo: &Topology, elevation: &[f32], sea: &[bool], rain: &[f32], c
     Hydrology { drain, discharge, lake }
 }
 
+/// How water picks its way downhill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Routing {
+    /// How much rivers wander off the steepest way down, 0..1: 0 runs
+    /// straight down slopes, 1 meanders strongly.
+    pub meander: f64,
+    /// How strongly small streams turn aside to join a bigger river beside
+    /// them rather than running parallel to it. 0 turns it off.
+    pub merge: f64,
+}
+
+impl Default for Routing {
+    fn default() -> Self {
+        Routing { meander: 0.75, merge: 1.0 }
+    }
+}
+
 /// The neighbour hex `i` drains into: one lower on the `surface` (which
 /// guarantees every path ends), preferring the biggest drop in the original
 /// ground. On open slopes that's the steepest way down, and across filled
 /// basins it follows the old valley floor. Each candidate's drop is scaled
 /// by a hashed factor, so on smooth, even slopes rivers wander a little
-/// instead of running dead straight.
+/// instead of running dead straight. Given the current `flow`, a neighbour
+/// already carrying much more water than `i` gets a bonus, so a stream
+/// beside a bigger river joins it instead of running alongside.
 fn downhill(
     topo: &Topology,
     elevation: &[f32],
     surface: &[f64],
     i: usize,
     allowed: impl Fn(usize) -> bool,
+    routing: Routing,
+    flow: Option<&[f32]>,
 ) -> u32 {
+    let candidates: Vec<HexId> = topo
+        .neighbors(HexId(i as u32))
+        .filter(|nb| allowed(nb.index()) && surface[nb.index()] < surface[i])
+        .collect();
+    let drop = |nb: HexId| (elevation[i] - elevation[nb.index()]) as f64;
+    let scale = candidates.iter().map(|&nb| drop(nb).abs()).fold(1e-9, f64::max);
+    let meander = routing.meander.clamp(0.0, 1.0);
     let score = |nb: HexId| {
         let wobble = (sim_core::rng::mix(i as u64, nb.0 as u64, 0, 7) >> 11) as f64 / (1u64 << 53) as f64;
-        (elevation[i] - elevation[nb.index()]) as f64 * (0.25 + 1.5 * wobble)
+        let mut s = drop(nb) * (1.0 + meander * (2.0 * wobble - 1.0));
+        if let Some(q) = flow {
+            let (mine, theirs) = (q[i] as f64, q[nb.index()] as f64);
+            if theirs > mine && mine > 0.0 {
+                // Full pull from a neighbour carrying 8× the water.
+                s += routing.merge * scale * ((theirs / mine).ln() / 8f64.ln()).min(1.0);
+            }
+        }
+        s
     };
-    topo.neighbors(HexId(i as u32))
-        .filter(|nb| allowed(nb.index()) && surface[nb.index()] < surface[i])
+    candidates
+        .into_iter()
         .max_by(|&a, &b| score(a).total_cmp(&score(b)).then(b.0.cmp(&a.0)))
         .map_or(NO_DRAIN, |nb| nb.0)
 }
@@ -393,7 +485,7 @@ mod tests {
     fn everything_drains_to_the_sea_or_off_the_map() {
         let (topo, elevation, sea) = valley();
         let rain = vec![1.0; topo.len()];
-        let h = compute(&topo, &elevation, &sea, &rain, 1.0);
+        let h = compute(&topo, &elevation, &sea, &rain, 1.0, Routing::default(), 1.0);
         for id in topo.ids() {
             let mut at = id.index();
             for _ in 0..topo.len() {
@@ -410,19 +502,33 @@ mod tests {
     fn discharge_grows_downstream_and_the_basin_fills() {
         let (topo, elevation, sea) = valley();
         let rain = vec![1.0; topo.len()];
-        let h = compute(&topo, &elevation, &sea, &rain, 1.0);
+        let h = compute(&topo, &elevation, &sea, &rain, 1.0, Routing::default(), 1.0);
         let at = |c, r| topo.at(c, r).unwrap().index();
-        assert!(h.discharge[at(5, 4)] > h.discharge[at(20, 4)], "more water lower down the valley");
-        assert!(h.discharge[at(5, 4)] > 50.0, "the valley floor collects most of the catchment");
+        assert!(h.discharge[at(5, 4)] > h.discharge[at(11, 4)], "more water lower down the valley");
+        assert!(h.discharge[at(20, 4)] > h.discharge[at(27, 4)]);
         assert!(h.lake[at(15, 4)], "the basin holds a lake");
         assert!(!h.lake[at(25, 4)]);
+    }
+
+    #[test]
+    fn a_basin_that_does_not_fill_keeps_its_water_and_a_full_one_spills() {
+        let (topo, elevation, sea) = valley();
+        let at = |c, r| topo.at(c, r).unwrap().index();
+        // Too little water to fill the basin: the river ends in its lake.
+        let h = compute(&topo, &elevation, &sea, &vec![1.0; topo.len()], 1.0, Routing::default(), 1.0);
+        assert_eq!(h.drain[at(15, 4)], NO_DRAIN, "the lake has no outlet");
+        assert!(h.discharge[at(12, 4)] < h.discharge[at(18, 4)], "nothing flows on past the basin");
+        // Plenty: the lake fills the basin and overflows down the valley.
+        let h = compute(&topo, &elevation, &sea, &vec![50.0; topo.len()], 1.0, Routing::default(), 1.0);
+        assert!(h.discharge[at(12, 4)] > h.discharge[at(18, 4)], "the overflow carries on downstream");
+        assert!(h.discharge[at(5, 4)] > h.discharge[at(20, 4)]);
     }
 
     #[test]
     fn dry_basins_stay_dry() {
         let (topo, elevation, sea) = valley();
         let rain = vec![1e-6; topo.len()];
-        let h = compute(&topo, &elevation, &sea, &rain, 1.0);
+        let h = compute(&topo, &elevation, &sea, &rain, 1.0, Routing::default(), 1.0);
         assert!(h.lake.iter().all(|&l| !l));
     }
 
@@ -438,7 +544,7 @@ mod tests {
             }
         }
         let rain = vec![1.0; topo.len()];
-        let h = compute(&topo, &elevation, &sea, &rain, 1.0);
+        let h = compute(&topo, &elevation, &sea, &rain, 1.0, Routing::default(), 1.0);
         assert!(h.lake.iter().all(|&l| !l), "a one-hex trench is a river, not a string of lake");
     }
 
@@ -446,7 +552,7 @@ mod tests {
     fn dry_ground_in_a_basin_drains_into_its_lake() {
         let (topo, elevation, sea) = valley();
         let rain = vec![1.0; topo.len()];
-        let h = compute(&topo, &elevation, &sea, &rain, 0.05);
+        let h = compute(&topo, &elevation, &sea, &rain, 0.05, Routing::default(), 1.0);
         let lake: Vec<usize> = (0..topo.len()).filter(|&i| h.lake[i]).collect();
         assert!(!lake.is_empty() && lake.len() < 19, "a small catchment fills only part of the basin");
         let centre = topo.at(15, 4).unwrap();

@@ -116,7 +116,9 @@ trivially serialisable.
   erodes alike: gathered water cuts towards its drain (√discharge, capped
   per round), steep slopes slump, sinks silt up. Cuts never dig below the
   coarse eroded surface (no notches at cliff feet); deeply cut valleys lose
-  ruggedness, so ranges break up into ridges.
+  ruggedness, so ranges break up into ridges. Dips the blending leaves
+  along valleys are filled back up (never above the original ground), so
+  erosion makes no new basins and rivers don't climb out of them.
 - **Inland seas:** low-frequency basins sag into continental interiors
   (the Inland seas setting); sea bodies not reaching the open ocean or an
   open edge and under a fifth of all sea get inland-sea biomes.
@@ -129,14 +131,20 @@ trivially serialisable.
   or off an open edge; drainage prefers the biggest drop in the original
   ground (so rivers follow valley floors through filled basins) with a
   hashed wobble so they meander; discharge accumulates rainfall × area
-  (scale-independent); rivers water their banks.
+  (scale-independent); rivers water their banks. Two more routing rounds
+  give lower neighbours already carrying much more water a bonus, so
+  streams join bigger rivers beside them. The river threshold is a world
+  setting stored in the terrain (what's drawn and watered, not where water
+  goes).
 - **Lakes:** a lake is a whole flooded basin, not just the hexes a river
   crosses. Water rises from the basin's lowest point until the lake covers
   about 5% of its catchment (evaporation balancing inflow) or it spills;
   then a shape pass keeps only open water (hexes within one step of a hex
   surrounded by lake, or small compact ponds), so flooded valley floors stay
   rivers instead of long strings of lake. The rest of the basin drains into
-  the lake along the real terrain.
+  the lake along the real terrain. A basin whose lake doesn't fill it is
+  closed: its lake (or lowest point) has no outlet and the rivers feeding it
+  end there.
 - **Climate:** temperature from latitude and altitude. Rainfall is
   simulated: winds by latitude band carry moisture from warm seas, rain it
   out over land, wring it out over mountains (rain shadows), with wet

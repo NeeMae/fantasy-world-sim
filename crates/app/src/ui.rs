@@ -282,6 +282,33 @@ fn world_section(
         }));
         ui.end_row();
 
+        ui.label("Rivers").on_hover_text(
+            "How many streams count as rivers: only the great rivers, or every sizeable stream",
+        );
+        ui.add(egui::Slider::new(&mut settings.rivers, 0.0..=1.0).step_by(0.05).custom_formatter(|v, _| {
+            match v {
+                v if v < 0.2 => "Great only",
+                v if v < 0.4 => "Few",
+                v if v <= 0.6 => "Normal",
+                v if v <= 0.8 => "Many",
+                _ => "Every stream",
+            }
+            .to_string()
+        }));
+        ui.end_row();
+
+        ui.label("Lakes").on_hover_text("How big lakes grow before evaporation balances their inflow");
+        ui.add(egui::Slider::new(&mut settings.lakes, 0.0..=2.0).step_by(0.05).custom_formatter(|v, _| {
+            match v {
+                v if v < 0.05 => "None",
+                v if v < 0.7 => "Small",
+                v if v <= 1.3 => "Normal",
+                _ => "Big",
+            }
+            .to_string()
+        }));
+        ui.end_row();
+
         ui.label("Inland seas").on_hover_text("How many basins in the continents flood into enclosed seas");
         ui.add(egui::Slider::new(&mut settings.inland_seas, 0.0..=1.0).step_by(0.05).custom_formatter(
             |v, _| {

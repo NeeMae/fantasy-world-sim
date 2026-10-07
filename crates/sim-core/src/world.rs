@@ -23,8 +23,11 @@ pub struct Terrain {
     /// off the map's edge).
     pub drain: Vec<u32>,
     /// Water flowing out of each hex: its catchment's rainfall × area.
-    /// At [`RIVER_DISCHARGE`] and above it's a river.
+    /// At [`Terrain::river_threshold`] and above it's a river.
     pub discharge: Vec<f32>,
+    /// Discharge at which a stream counts as a river (and is drawn as one).
+    /// [`RIVER_DISCHARGE`] by default; higher gives fewer, bigger rivers.
+    pub river_threshold: f32,
     /// Ocean currents: sea-surface temperature anomaly, about −1 (a cold
     /// current) to +1 (a warm one); 0 on land.
     pub current: Vec<f32>,
@@ -33,7 +36,8 @@ pub struct Terrain {
 /// [`Terrain::drain`] for water that leaves the land.
 pub const NO_DRAIN: u32 = u32::MAX;
 
-/// Discharge at which a stream counts as a river.
+/// The default discharge at which a stream counts as a river (see
+/// [`Terrain::river_threshold`]); lakes and erosion measure water by it.
 pub const RIVER_DISCHARGE: f32 = 0.0025;
 
 impl Terrain {
@@ -48,6 +52,7 @@ impl Terrain {
             relief: vec![ReliefId::default(); len],
             drain: vec![NO_DRAIN; len],
             discharge: vec![0.0; len],
+            river_threshold: RIVER_DISCHARGE,
             current: vec![0.0; len],
         }
     }
@@ -68,7 +73,7 @@ impl Terrain {
     /// How big the river through a hex is: 0 for none, 1 at the threshold,
     /// one more for each doubling of discharge beyond it.
     pub fn river(&self, i: usize) -> f32 {
-        let q = self.discharge[i] / RIVER_DISCHARGE;
+        let q = self.discharge[i] / self.river_threshold;
         if q < 1.0 { 0.0 } else { 1.0 + q.log2() }
     }
 
@@ -157,6 +162,7 @@ impl World {
         h.u64(self.tick);
         h.u64(self.terrain_revision);
         h.u64(self.rules.volatility.to_bits() as u64);
+        h.u64(self.terrain.river_threshold.to_bits() as u64);
         let t = &self.terrain;
         for v in t
             .elevation

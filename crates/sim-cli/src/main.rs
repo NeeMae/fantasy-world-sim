@@ -54,6 +54,12 @@ struct Args {
     /// How deeply basins sink into continents, flooding as inland seas, 0..1.
     #[arg(long, default_value_t = 0.3)]
     inland_seas: f64,
+    /// How many streams count as rivers, 0 (great rivers only) to 1 (many).
+    #[arg(long, default_value_t = 0.5)]
+    rivers: f64,
+    /// Lake size: 0 none, 1 normal, 2 big.
+    #[arg(long, default_value_t = 1.0)]
+    lakes: f64,
     /// Erosion: 0 none, 1 normal, 2 ancient, deeply carved land.
     #[arg(long, default_value_t = 1.0)]
     erosion: f64,
@@ -182,6 +188,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         mountains: args.mountains,
         inland_seas: args.inland_seas,
         erosion: args.erosion,
+        rivers: args.rivers,
+        lakes: args.lakes,
         rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
         latitudes: match (args.climate, args.shape) {
             (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,
@@ -287,6 +295,7 @@ fn print_biomes(world: &sim_core::World, registry: &content::Registry) {
         .filter(|&i| world.terrain.river(i) > 0.0 && !registry.biome(world.terrain.biome[i]).water)
         .count();
     println!("  rivers       {:>6.2}% of land", rivers as f64 / land as f64 * 100.0);
+    river_stats(world, registry);
     lake_stats(world, registry);
     let continental = world.geology.plates.iter().filter(|p| p.continental).count();
     println!("  plates: {} ({continental} continental)", world.geology.plates.len());
@@ -341,5 +350,40 @@ fn lake_stats(world: &World, registry: &Registry) {
         at,
         sizes[sizes.len() / 2].0,
         thin as f64 / total as f64 * 100.0
+    );
+}
+
+/// How rivers behave: how many river hexes flow uphill (into higher ground,
+/// as when crossing a filled basin), and how many run side by side with a
+/// different river instead of joining it.
+fn river_stats(world: &World, registry: &Registry) {
+    let uphill_step: f32 = std::env::var("FWS_UPHILL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.002);
+
+    let t = &world.terrain;
+    let is_river = |i: usize| t.river(i) > 0.0 && !registry.biome(t.biome[i]).water;
+    let (mut total, mut uphill, mut parallel) = (0, 0, 0);
+    for i in (0..t.len()).filter(|&i| is_river(i)) {
+        total += 1;
+        let d = t.drain[i];
+        // Noticeably uphill: more than a hair (fills add tiny slopes).
+        if d != sim_core::NO_DRAIN && t.elevation[d as usize] > t.elevation[i] + uphill_step {
+            uphill += 1;
+        }
+        let beside = world.topology.neighbors(HexId(i as u32)).any(|nb| {
+            let j = nb.index();
+            is_river(j)
+                && d != j as u32
+                && t.drain[j] != i as u32
+                && (d == sim_core::NO_DRAIN || t.drain[j] != d)
+        });
+        if beside {
+            parallel += 1;
+        }
+    }
+    let pct = |n: usize| n as f64 / total.max(1) as f64 * 100.0;
+    println!(
+        "  river hexes  {total}: {:.1}% flow uphill, {:.1}% run beside another river",
+        pct(uphill),
+        pct(parallel)
     );
 }

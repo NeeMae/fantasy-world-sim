@@ -74,6 +74,13 @@ pub struct WorldGenParams {
     /// How much rivers and weather wear the land down: 0 none, 1 normal,
     /// 2 ancient, deeply carved land.
     pub erosion: f64,
+    /// How many streams count as rivers, 0..1: 0 only the great rivers, 1
+    /// every sizeable stream. Changes what's drawn and watered, not where
+    /// water flows.
+    pub rivers: f64,
+    /// Scales how big lakes grow before evaporation balances their inflow:
+    /// 0 gives none (closed basins end in dry flats), 2 big lakes.
+    pub lakes: f64,
 }
 
 /// How the map maps onto the planet's climate bands.
@@ -109,6 +116,8 @@ impl Default for WorldGenParams {
             mountains: 1.0,
             inland_seas: 0.3,
             erosion: 1.0,
+            rivers: 0.5,
+            lakes: 1.0,
         }
     }
 }
@@ -123,6 +132,14 @@ pub enum WorldGenError {
     Empty,
     #[error("world size must be positive (got {0})")]
     BadWorldSize(f64),
+}
+
+/// The discharge a stream needs to count as a river for a `rivers` setting
+/// (0..1): from 8× the default threshold (great rivers only) down to half
+/// of it, with the middle setting at twice the default.
+pub fn river_threshold(rivers: f64) -> f32 {
+    let v = rivers.clamp(0.0, 1.0);
+    (sim_core::RIVER_DISCHARGE as f64 * 8f64.powf(1.0 - v) * 0.5f64.powf(v)) as f32
 }
 
 /// Rows in the fixed-resolution copy of the world that erosion works on.
@@ -408,6 +425,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     if let Some((coarse, delta, after)) = &carved {
         let delta = upsample(coarse, delta, &topology);
         let after = upsample(coarse, after, &topology);
+        let original = terrain.elevation.clone();
         for i in 0..terrain.len() {
             let e = terrain.elevation[i];
             // Cut down by the coarse cut, but never below the coarse eroded
@@ -416,6 +434,24 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
             let new = if delta[i] < 0.0 { e.min((e + delta[i]).max(after[i])) } else { e + delta[i] };
             terrain.elevation[i] = new;
             terrain.ruggedness[i] *= 1.0 - smoothstep(0.0, VALLEY_DEPTH, (e - new) as f64) as f32 * 0.85;
+        }
+        // Blending a coarse valley onto the map leaves it a chain of dips
+        // (deepest at coarse hex centres, with saddles between), which rivers
+        // would have to climb out of. Erosion makes no new basins: fill each
+        // dip back up, but never above the ground's original height, so
+        // basins that were there before (lakes, inland seas) stay.
+        let coast = {
+            let mut sorted = terrain.elevation.clone();
+            sorted.sort_unstable_by(f32::total_cmp);
+            sorted[((sorted.len() - 1) as f64 * share) as usize]
+        };
+        let sea: Vec<bool> = terrain.elevation.iter().map(|&e| e < coast).collect();
+        let filled = hydrology::fill(&topology, &terrain.elevation, &sea);
+        for i in 0..terrain.len() {
+            let f = filled[i] as f32;
+            if f > terrain.elevation[i] {
+                terrain.elevation[i] = f.min(original[i]).max(terrain.elevation[i]);
+            }
         }
     }
 
@@ -490,7 +526,16 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     let rain: Vec<f32> = rain.iter().map(|r| r * params.rainfall.max(0.0) as f32).collect();
 
     // Rivers and lakes from that rainfall.
-    let water = hydrology::compute(&topology, &terrain.elevation, &sea, &rain, column_step * row_step);
+    let water = hydrology::compute(
+        &topology,
+        &terrain.elevation,
+        &sea,
+        &rain,
+        column_step * row_step,
+        hydrology::Routing::default(),
+        params.lakes.max(0.0),
+    );
+    terrain.river_threshold = river_threshold(params.rivers);
     terrain.drain = water.drain;
     terrain.discharge = water.discharge;
     for (i, &lake) in water.lake.iter().enumerate() {

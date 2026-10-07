@@ -2,7 +2,23 @@
 
 ## Unreleased
 
+### New
+- **Rivers** setting: from only the great rivers to every sizeable stream.
+  The default now shows about half as many rivers as v0.2.0.
+- **Lakes** setting: from none to big lakes.
+- Closed basins: a lake too small to fill its basin has no outlet, so its
+  rivers end there (like the Great Salt Lake) instead of climbing out of the
+  basin to reach the sea.
+
 ### Fixed
+- Rivers no longer climb small rises left by erosion: carving valleys left
+  dips along them, which are now filled back up.
+- Small streams beside a bigger river turn to join it more often instead of
+  running alongside it.
+
+### Note
+- The same seed gives somewhat different rivers and lakes from v0.2.0.
+  Saves from v0.2.0 still load, with their rivers as they were.
 - Zoomed out, the map no longer shows a checkerboard of lighter and darker
   squares (or a grainy shimmer): map textures are now mipmapped.
 

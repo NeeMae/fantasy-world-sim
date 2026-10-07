@@ -68,6 +68,10 @@ pub struct WorldSettings {
     pub inland_seas: f64,
     /// Erosion strength, 0..2.
     pub erosion: f64,
+    /// How many streams count as rivers, 0..1.
+    pub rivers: f64,
+    /// Lake size, 0..2.
+    pub lakes: f64,
 }
 
 impl Default for WorldSettings {
@@ -89,6 +93,8 @@ impl Default for WorldSettings {
             mountains: 1.0,
             inland_seas: 0.3,
             erosion: 1.0,
+            rivers: 0.5,
+            lakes: 1.0,
         }
     }
 }
@@ -128,6 +134,8 @@ impl WorldSettings {
             mountains: self.mountains,
             inland_seas: self.inland_seas,
             erosion: self.erosion,
+            rivers: self.rivers,
+            lakes: self.lakes,
         })
     }
 }
