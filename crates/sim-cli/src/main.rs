@@ -60,6 +60,9 @@ struct Args {
     /// Lake size: 0 none, 1 normal, 2 big.
     #[arg(long, default_value_t = 1.0)]
     lakes: f64,
+    /// How mountains are made.
+    #[arg(long, value_enum, default_value_t = Geology::Classic)]
+    geology: Geology,
     /// Erosion: 0 none, 1 normal, 2 ancient, deeply carved land.
     #[arg(long, default_value_t = 1.0)]
     erosion: f64,
@@ -119,6 +122,14 @@ enum View {
     Fertility,
     /// Ocean currents.
     Currents,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Geology {
+    /// Plate uplift shaped by ridge noise, then a quick erosion pass.
+    Classic,
+    /// Mountains raised and carved by rivers over time (slower).
+    Simulated,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -190,6 +201,10 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         erosion: args.erosion,
         rivers: args.rivers,
         lakes: args.lakes,
+        geology: match args.geology {
+            Geology::Classic => worldgen::GeologyModel::Classic,
+            Geology::Simulated => worldgen::GeologyModel::Simulated,
+        },
         rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
         latitudes: match (args.climate, args.shape) {
             (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,

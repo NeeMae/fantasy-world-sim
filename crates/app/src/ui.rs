@@ -29,6 +29,7 @@ pub fn panels(
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     mut load: MessageWriter<LoadRequest>,
+    mut generation: ResMut<crate::generating::Generation>,
     // Bumped by "More names" so the samples change.
     mut name_draw: Local<u64>,
 ) -> Result {
@@ -85,7 +86,7 @@ pub fn panels(
 
     let side = egui::Panel::right("side").default_size(250.0).show(&mut root, |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            world_section(ui, &mut settings, &mut regenerate, world);
+            world_section(ui, &mut settings, &mut regenerate, world, generation.busy());
             ui.separator();
             saves::section(ui, &mut save_state, &sim, &settings, &mut load);
             ui.separator();
@@ -100,6 +101,8 @@ pub fn panels(
         });
     });
 
+    generation.window(ctx);
+
     let to_rect = |r: egui::Rect| Rect::new(r.min.x, r.min.y, r.max.x, r.max.y);
     over_ui.panels = vec![to_rect(top.response.rect), to_rect(side.response.rect)];
     over_ui.busy = ctx.is_pointer_over_egui() || ctx.egui_is_using_pointer() || ctx.any_popup_open();
@@ -111,6 +114,7 @@ fn world_section(
     settings: &mut WorldSettings,
     regenerate: &mut MessageWriter<RegenerateRequest>,
     world: &sim_core::World,
+    generating: bool,
 ) {
     ui.heading("World");
     ui.small(format!(
@@ -268,6 +272,15 @@ fn world_section(
         ));
         ui.end_row();
 
+        ui.label("Geology").on_hover_text(
+            "Classic: mountains stamped from the plates in one pass (fast).\nSimulated: the plates raise the land over time while rivers carve it (slower, more natural valleys and ridges).",
+        );
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut settings.geology, worldgen::GeologyModel::Classic, "Classic");
+            ui.selectable_value(&mut settings.geology, worldgen::GeologyModel::Simulated, "Simulated");
+        });
+        ui.end_row();
+
         ui.label("Erosion").on_hover_text(
             "How much rivers and weather have worn the land: young and sharp, or old and carved",
         );
@@ -343,7 +356,8 @@ fn world_section(
         );
     }
     let valid = settings.seed.trim().parse::<u64>().is_ok();
-    if ui.add_enabled(valid, egui::Button::new("Regenerate world")).clicked() {
+    let label = if generating { "Generating…" } else { "Regenerate world" };
+    if ui.add_enabled(valid && !generating, egui::Button::new(label)).clicked() {
         regenerate.write(RegenerateRequest);
     }
     if !valid {

@@ -111,6 +111,15 @@ trivially serialisable.
   may require a relief and a *massif* (range greatness from the tectonic
   uplift), so the Alps, Rockies and Himalaya differ while the Appalachians
   keep their forests and hills never change the biome.
+- **Simulated geology (experimental, opt-in):** instead of stamping
+  ridge-noise mountains and eroding once, a landscape-evolution model on a
+  fixed 240-row grid lifts the land by the tectonic uplift over 200 steps
+  while implicit stream-power incision (Braun & Willett) and hillslope creep
+  carve it; ruggedness comes from the resulting slopes. The relief is
+  blended onto the map and a few full-resolution rounds let rivers cut
+  through the blend's saddles. Climate and biomes read a slightly smoothed
+  elevation so carved terrain doesn't speckle them. Generation runs on a
+  background thread in stages, with previews in the app.
 - **Erosion:** ten rounds of a stream-power model on a fixed-resolution
   (160-row) copy of the raw terrain, blended onto the map so every scale
   erodes alike: gathered water cuts towards its drain (√discharge, capped

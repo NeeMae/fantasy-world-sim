@@ -72,6 +72,8 @@ pub struct WorldSettings {
     pub rivers: f64,
     /// Lake size, 0..2.
     pub lakes: f64,
+    /// How mountains are made.
+    pub geology: worldgen::GeologyModel,
 }
 
 impl Default for WorldSettings {
@@ -95,6 +97,7 @@ impl Default for WorldSettings {
             erosion: 1.0,
             rivers: 0.5,
             lakes: 1.0,
+            geology: worldgen::GeologyModel::Classic,
         }
     }
 }
@@ -136,6 +139,7 @@ impl WorldSettings {
             erosion: self.erosion,
             rivers: self.rivers,
             lakes: self.lakes,
+            geology: self.geology,
         })
     }
 }
@@ -196,11 +200,27 @@ pub fn regenerate(
     mut selection: ResMut<Selection>,
     mut hover: ResMut<Hover>,
     mut saves: ResMut<crate::saves::SaveState>,
+    mut generation: ResMut<crate::generating::Generation>,
 ) {
-    if requests.read().count() == 0 {
-        return;
+    if requests.read().count() > 0 {
+        match settings.params() {
+            Ok(params) => generation.start(params, content.0.clone()),
+            Err(e) => error!("could not generate world: {e}"),
+        }
     }
-    match start_world(&mut commands, &mut images, &content, &settings, mode.0) {
+    let Some(result) = generation.poll() else {
+        return;
+    };
+    let result = result.map(|world| {
+        info!(
+            "generated {}×{} world with seed {}",
+            world.topology.width(),
+            world.topology.height(),
+            world.seed
+        );
+        show_world(&mut commands, &mut images, Simulation::new(world, content.0.clone()), mode.0)
+    });
+    match result {
         Ok(size) => {
             // A new world: don't let Ctrl+S overwrite the last one's save.
             saves.name.clear();

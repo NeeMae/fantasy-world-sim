@@ -21,6 +21,7 @@ use tectonics::{PlateLayer, smoothstep};
 mod climate;
 mod currents;
 mod erosion;
+mod geology;
 mod hydrology;
 mod seas;
 mod tectonics;
@@ -74,6 +75,9 @@ pub struct WorldGenParams {
     /// How much rivers and weather wear the land down: 0 none, 1 normal,
     /// 2 ancient, deeply carved land.
     pub erosion: f64,
+    /// How mountains are made: stamped from the plates in one pass, or
+    /// raised and carved over time.
+    pub geology: GeologyModel,
     /// How many streams count as rivers, 0..1: 0 only the great rivers, 1
     /// every sizeable stream. Changes what's drawn and watered, not where
     /// water flows.
@@ -81,6 +85,17 @@ pub struct WorldGenParams {
     /// Scales how big lakes grow before evaporation balances their inflow:
     /// 0 gives none (closed basins end in dry flats), 2 big lakes.
     pub lakes: f64,
+}
+
+/// How mountains are made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GeologyModel {
+    /// Plate uplift shaped by ridge noise, then a quick erosion pass.
+    #[default]
+    Classic,
+    /// The plates raise the land over time while rivers carve it (see the
+    /// `geology` module): slower, with valleys and ridges that rivers made.
+    Simulated,
 }
 
 /// How the map maps onto the planet's climate bands.
@@ -118,6 +133,7 @@ impl Default for WorldGenParams {
             erosion: 1.0,
             rivers: 0.5,
             lakes: 1.0,
+            geology: GeologyModel::Classic,
         }
     }
 }
@@ -140,6 +156,85 @@ pub enum WorldGenError {
 pub fn river_threshold(rivers: f64) -> f32 {
     let v = rivers.clamp(0.0, 1.0);
     (sim_core::RIVER_DISCHARGE as f64 * 8f64.powf(1.0 - v) * 0.5f64.powf(v)) as f32
+}
+
+/// Distance (noise-space units) over which simulated terrain is smoothed
+/// when choosing biomes.
+const BIOME_SMOOTHING: f64 = 0.008;
+/// Rounds of full-resolution erosion after blending simulated geology on.
+const SETTLE_STEPS: usize = 8;
+/// Rows in the fixed-resolution copy that simulated geology works on.
+const GEOLOGY_ROWS: u32 = 240;
+/// Slopes (raw height per noise-space unit) from flat to most rugged.
+const SLOPE_FLAT: f64 = 2.0;
+const SLOPE_RUGGED: f64 = 20.0;
+
+/// Raises and carves a coarse copy of the world over time. Returns its
+/// topology and, per hex, the relief added to the starting ground and the
+/// ruggedness of the result.
+fn simulate_geology(
+    params: &WorldGenParams,
+    layers: &Layers,
+    sea_share: f64,
+    registry: &Registry,
+    report: &mut dyn FnMut(Progress),
+) -> (Topology, Vec<f32>, Vec<f32>) {
+    let rows = GEOLOGY_ROWS;
+    let mut cols = ((params.width as f64 * rows as f64 / params.height as f64).round() as u32).max(2);
+    if params.wrap == Wrap::X {
+        cols += cols & 1;
+    }
+    let coarse = Topology::new(cols, rows, params.wrap);
+    let coarse_params = WorldGenParams { width: cols, height: rows, ..params.clone() };
+    let samples: Vec<(f32, f32)> = (0..coarse.len() as u32)
+        .into_par_iter()
+        .map(|i| {
+            let s = sample(&coarse, layers, &coarse_params, sim_core::HexId(i));
+            (s.base, s.orogeny)
+        })
+        .collect();
+    let base: Vec<f32> = samples.iter().map(|s| s.0).collect();
+    let uplift: Vec<f32> = samples.iter().map(|s| s.1).collect();
+    // The sea surface: where the coast would fall with the full uplift.
+    let sea_level = {
+        let mut sorted: Vec<f32> = base.iter().zip(&uplift).map(|(b, u)| b + u).collect();
+        sorted.sort_unstable_by(f32::total_cmp);
+        sorted[((sorted.len() - 1) as f64 * sea_share) as usize]
+    };
+    let row_step = params.world_size / rows as f64;
+    let column_step = 0.75 / (3f64.sqrt() / 2.0) * row_step;
+    let input = geology::Input {
+        topology: &coarse,
+        base: &base,
+        uplift: &uplift,
+        sea_level,
+        cell_area: column_step * row_step,
+        spacing: row_step,
+        erosion: params.erosion,
+        steps: geology::STEPS,
+    };
+    let h = geology::evolve(&input, &mut |fraction, h| {
+        let preview = preview_world(&coarse, h, sea_share, registry);
+        // The full-resolution finish takes the last tenth or so.
+        let fraction = fraction * 0.9;
+        report(Progress {
+            stage: Stage::Mountains,
+            fraction,
+            preview: Some((&preview, PreviewView::Elevation)),
+        });
+    });
+    let slope = geology::slope(&coarse, &h, row_step);
+    let rugged = slope
+        .iter()
+        .zip(&h)
+        .map(
+            |(&s, &e)| {
+                if e < sea_level { 0.0 } else { smoothstep(SLOPE_FLAT, SLOPE_RUGGED, s as f64) as f32 }
+            },
+        )
+        .collect();
+    let relief = h.iter().zip(&base).map(|(h, b)| h - b).collect();
+    (coarse, relief, rugged)
 }
 
 /// Rows in the fixed-resolution copy of the world that erosion works on.
@@ -252,6 +347,11 @@ struct Land {
     massif: f64,
     plate: tectonics::Site,
     stress: f64,
+    /// The part of `elevation` that mountain building added (for simulated
+    /// geology, which raises mountains itself).
+    raised: f64,
+    /// Smooth tectonic uplift, before ridging.
+    orogeny: f64,
 }
 
 impl Layers {
@@ -336,7 +436,9 @@ impl Layers {
         // The greatest collisions reach ~0.8 uplift; old and microplate
         // ranges stay well below, like the Appalachians beside the Alps.
         let massif = (t.orogeny / 0.8).clamp(0.0, 1.0);
-        Land { elevation, ruggedness, massif, plate: t.plate, stress: t.stress }
+        let raised = t.orogeny * (0.55 + 0.45 * crest);
+        let orogeny = t.orogeny;
+        Land { elevation, ruggedness, massif, plate: t.plate, stress: t.stress, raised, orogeny }
     }
 }
 
@@ -367,9 +469,69 @@ struct Sample {
     massif: f32,
     plate: tectonics::Site,
     stress: f32,
+    /// Elevation without mountain building, and the smooth uplift that
+    /// built them (see [`Land`]).
+    base: f32,
+    orogeny: f32,
+}
+
+/// The stages of world generation, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Continents, plates and where they collide.
+    Plates,
+    /// Mountains raised and worn down.
+    Mountains,
+    /// Temperature, currents, winds and rain.
+    Climate,
+    /// Rivers and lakes.
+    Water,
+    /// Biomes and the finished map.
+    Biomes,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 5] =
+        [Stage::Plates, Stage::Mountains, Stage::Climate, Stage::Water, Stage::Biomes];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Plates => "Continents and plates",
+            Stage::Mountains => "Raising and wearing down mountains",
+            Stage::Climate => "Climate: currents, winds and rain",
+            Stage::Water => "Rivers and lakes",
+            Stage::Biomes => "Biomes",
+        }
+    }
+}
+
+/// Which map view suits a preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewView {
+    Plates,
+    Elevation,
+    Rainfall,
+}
+
+/// A report from a running generation: the stage, how far through it, and
+/// sometimes a picture of the world so far (it may be at a coarser
+/// resolution than the finished map).
+pub struct Progress<'a> {
+    pub stage: Stage,
+    pub fraction: f32,
+    pub preview: Option<(&'a World, PreviewView)>,
 }
 
 pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, WorldGenError> {
+    generate_with(params, registry, &mut |_| {})
+}
+
+/// [`generate`], reporting progress (and previews) as it goes.
+pub fn generate_with(
+    params: &WorldGenParams,
+    registry: &Registry,
+    report: &mut dyn FnMut(Progress),
+) -> Result<World, WorldGenError> {
     if registry.biomes().is_empty() {
         return Err(WorldGenError::NoBiomes);
     }
@@ -383,6 +545,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         return Err(WorldGenError::OddWrapWidth(params.width));
     }
     let topology = Topology::new(params.width, params.height, params.wrap);
+    report(Progress { stage: Stage::Plates, fraction: 0.0, preview: None });
     let layers = Layers::new(params);
 
     let samples: Vec<Sample> = (0..topology.len() as u32)
@@ -393,6 +556,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     let mut terrain = Terrain::new(topology.len());
     let mut geology = Geology::default();
     let mut variation = Vec::with_capacity(topology.len());
+    let mut base = Vec::with_capacity(topology.len());
     // Plates are numbered in order of first appearance, so ids are stable.
     let mut plate_ids: HashMap<[i32; 3], u16> = HashMap::new();
     for (i, s) in samples.into_iter().enumerate() {
@@ -401,6 +565,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         terrain.ruggedness[i] = s.ruggedness;
         terrain.massif[i] = s.massif;
         variation.push(s.moisture);
+        base.push(s.base);
         let next = plate_ids.len() as u16;
         let id = *plate_ids.entry(s.plate.cell).or_insert_with(|| {
             geology.plates.push(Plate { continental: false });
@@ -421,7 +586,54 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     // change is blended onto the map. Where it cut deep, a range is broken
     // into separate ridges by its valleys.
     let share = params.ocean.unwrap_or(sea_level as f64).clamp(0.0, 1.0);
-    let carved = erosion_delta(params, &layers, share);
+    {
+        let mut preview = preview_world(&topology, &terrain.elevation, share, registry);
+        preview.geology = geology.clone();
+        report(Progress {
+            stage: Stage::Plates,
+            fraction: 1.0,
+            preview: Some((&preview, PreviewView::Plates)),
+        });
+        report(Progress {
+            stage: Stage::Mountains,
+            fraction: 0.0,
+            preview: Some((&preview, PreviewView::Elevation)),
+        });
+    }
+    let carved = match params.geology {
+        GeologyModel::Classic => erosion_delta(params, &layers, share),
+        GeologyModel::Simulated => {
+            let (coarse, relief, rugged) = simulate_geology(params, &layers, share, registry, report);
+            let relief = upsample(&coarse, &relief, &topology);
+            let rugged = upsample(&coarse, &rugged, &topology);
+            for i in 0..terrain.len() {
+                terrain.elevation[i] = base[i] + relief[i];
+                terrain.ruggedness[i] = rugged[i];
+            }
+            // A few more rounds of erosion at full resolution, so rivers
+            // cut through the saddles that blending leaves along valleys.
+            let coast = {
+                let mut sorted = terrain.elevation.clone();
+                sorted.sort_unstable_by(f32::total_cmp);
+                sorted[((sorted.len() - 1) as f64 * share) as usize]
+            };
+            let zero = vec![0.0f32; terrain.len()];
+            terrain.elevation = geology::evolve(
+                &geology::Input {
+                    topology: &topology,
+                    base: &terrain.elevation,
+                    uplift: &zero,
+                    sea_level: coast,
+                    cell_area: column_step * row_step,
+                    spacing: row_step,
+                    erosion: params.erosion,
+                    steps: SETTLE_STEPS,
+                },
+                &mut |_, _| {},
+            );
+            None
+        }
+    };
     if let Some((coarse, delta, after)) = &carved {
         let delta = upsample(coarse, delta, &topology);
         let after = upsample(coarse, after, &topology);
@@ -469,6 +681,22 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         }
     }
     let sea: Vec<bool> = terrain.elevation.iter().map(|&e| e < sea_level).collect();
+    // Simulated geology carves valleys a hex or two wide, so heights jump
+    // about from hex to hex. Climate and biomes follow the lie of the land
+    // around each hex instead, or temperature, rain and biome edges come out
+    // speckled. (Rivers, the sea and the coast keep the true heights.)
+    let lie = match params.geology {
+        GeologyModel::Classic => terrain.elevation.clone(),
+        GeologyModel::Simulated => {
+            let reach = |step: f64| ((BIOME_SMOOTHING / step).round() as i32).max(1);
+            let mut e = climate::blur(&topology, &terrain.elevation, reach(column_step), 0);
+            e = climate::blur(&topology, &e, 0, reach(row_step));
+            e.iter()
+                .zip(&terrain.elevation)
+                .map(|(&smooth, &e)| if (e < sea_level) == (smooth < sea_level) { smooth } else { e })
+                .collect()
+        }
+    };
     let inland = seas::inland(&topology, &sea, params.edges == EdgeStyle::Open);
     for (i, &is_sea) in sea.iter().enumerate() {
         if is_sea {
@@ -478,12 +706,12 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         } else {
             // The highest ground is broken country even away from plate
             // boundaries: plateaus and old uplands become at least hills.
-            let e = terrain.elevation[i] as f64;
+            let e = lie[i] as f64;
             terrain.ruggedness[i] = (terrain.ruggedness[i] + smoothstep(0.86, 1.0, e) as f32 * 0.45).min(1.0);
         }
     }
     // Higher and more rugged ground is colder, so ranges carry snow.
-    for ((t, e), r) in terrain.temperature.iter_mut().zip(&terrain.elevation).zip(&terrain.ruggedness) {
+    for ((t, e), r) in terrain.temperature.iter_mut().zip(&lie).zip(&terrain.ruggedness) {
         *t = (*t + params.temperature as f32 - (e - 0.62).max(0.0) * 0.6 - r * 0.12).clamp(0.0, 1.0);
     }
     terrain.relief = terrain.ruggedness.iter().map(|&r| choose_relief(registry, r)).collect();
@@ -509,10 +737,19 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
             if sea[i] {
                 0.0
             } else {
-                (terrain.elevation[i] - sea_level) / (1.0 - sea_level).max(1e-3) + terrain.ruggedness[i] * 0.5
+                (lie[i] - sea_level) / (1.0 - sea_level).max(1e-3) + terrain.ruggedness[i] * 0.5
             }
         })
         .collect();
+    {
+        let preview = preview_world(&topology, &terrain.elevation, share, registry);
+        report(Progress {
+            stage: Stage::Mountains,
+            fraction: 1.0,
+            preview: Some((&preview, PreviewView::Elevation)),
+        });
+        report(Progress { stage: Stage::Climate, fraction: 0.0, preview: None });
+    }
     let rain = climate::rainfall(&climate::ClimateInput {
         topology: &topology,
         sea: &sea,
@@ -524,6 +761,15 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     });
 
     let rain: Vec<f32> = rain.iter().map(|r| r * params.rainfall.max(0.0) as f32).collect();
+    let mut preview = preview_world(&topology, &terrain.elevation, share, registry);
+    preview.terrain.moisture = rain.clone();
+    to_percentiles(&mut preview.terrain.moisture);
+    report(Progress {
+        stage: Stage::Climate,
+        fraction: 1.0,
+        preview: Some((&preview, PreviewView::Rainfall)),
+    });
+    report(Progress { stage: Stage::Water, fraction: 0.0, preview: None });
 
     // Rivers and lakes from that rainfall.
     let water = hydrology::compute(
@@ -538,6 +784,12 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     terrain.river_threshold = river_threshold(params.rivers);
     terrain.drain = water.drain;
     terrain.discharge = water.discharge;
+    preview.terrain.drain = terrain.drain.clone();
+    preview.terrain.discharge = terrain.discharge.clone();
+    preview.terrain.river_threshold = terrain.river_threshold;
+    report(Progress { stage: Stage::Water, fraction: 1.0, preview: Some((&preview, PreviewView::Rainfall)) });
+    report(Progress { stage: Stage::Biomes, fraction: 0.0, preview: None });
+    drop(preview);
     for (i, &lake) in water.lake.iter().enumerate() {
         if lake {
             // Lakes are water: flat, and no part of a mountain range.
@@ -574,7 +826,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
             choose_biome(
                 registry,
                 Site {
-                    elevation: t.elevation[i],
+                    elevation: lie[i],
                     moisture: t.moisture[i],
                     temperature: t.temperature[i],
                     relief: t.relief[i],
@@ -600,7 +852,27 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     let mut world = World::new(params.seed, topology, terrain);
     world.geology = geology;
     world.rules = params.rules;
+    report(Progress { stage: Stage::Biomes, fraction: 1.0, preview: None });
     Ok(world)
+}
+
+/// A rough world for previews: raw heights ranked into elevation, with
+/// sea below the coast (as the finished map will place it) and land above.
+fn preview_world(topology: &Topology, raw: &[f32], sea_share: f64, registry: &Registry) -> World {
+    let mut terrain = Terrain::new(topology.len());
+    terrain.elevation = raw.to_vec();
+    to_percentiles(&mut terrain.elevation);
+    let sea_level = registry.sea_level();
+    let s = sea_share.clamp(0.01, 0.99) as f32;
+    let find = |water: bool| {
+        registry.biomes().iter().position(|b| b.water == water && !b.lake && !b.inland).unwrap_or(0) as u16
+    };
+    let (water, land) = (BiomeId(find(true)), BiomeId(find(false)));
+    for (e, b) in terrain.elevation.iter_mut().zip(terrain.biome.iter_mut()) {
+        *e = if *e < s { *e / s * sea_level } else { sea_level + (*e - s) / (1.0 - s) * (1.0 - sea_level) };
+        *b = if *e < sea_level { water } else { land };
+    }
+    World::new(0, *topology, terrain)
 }
 
 /// Raw values for one hex.
@@ -663,6 +935,8 @@ fn sample(topology: &Topology, layers: &Layers, params: &WorldGenParams, hex: si
         massif: land.massif as f32,
         plate: land.plate,
         stress: land.stress as f32,
+        base: (elevation - land.raised) as f32,
+        orogeny: land.orogeny as f32,
     }
 }
 
