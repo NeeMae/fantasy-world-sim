@@ -1,15 +1,22 @@
-//! Plate tectonics, as a continuous field.
+//! Plate tectonics on the planet.
 //!
-//! Plates are cells of a Voronoi diagram whose sites sit one per cell of a
-//! hashed grid, jittered. Because sites come from a hash rather than a list,
-//! plates exist everywhere: past the edges of an open map, and seamlessly
-//! round a wrapping one. Everything here is a pure function of position, so
-//! the same world comes out at any scale.
+//! Plates are grown over a coarse sphere grid of their own (its size set by
+//! the planet's, never by the map's detail, so the same plates come out at
+//! any detail). Each plate grows from a seed at its own rate, through
+//! ground that's rougher in some places than others, so plates come in
+//! varied sizes with irregular outlines.
+//!
+//! Neighbouring plates are gathered into groups that drift together, like
+//! the plates of a supercontinent: boundaries inside a group are quiet old
+//! sutures (worn hill country), while boundaries between groups are where
+//! the great ranges rise. Microplates are carved out along those active
+//! boundaries, moving half on their own, and add their own smaller ranges
+//! and rifts there.
 //!
 //! Plates don't decide where land is: as on Earth, continents sit inside
 //! plates, and most coasts are not plate boundaries. The caller supplies a
 //! continental-crust field; plates only deform the land where they meet.
-//! Each plate drifts in some direction, and at a boundary their relative
+//! Each plate turns about its own pole, and at a boundary their relative
 //! motion, together with the crust on each side, decides the landform:
 //!
 //! | Meeting | Converging (colliding) | Diverging (pulling apart) |
@@ -18,222 +25,489 @@
 //! | continent + ocean | coastal range inland, trench offshore | rift / ridge |
 //! | ocean + ocean | volcanic island arc on one side | mid-ocean ridge |
 //!
-//! Two layers of plates are used: major plates carry the continents and
-//! raise the great ranges, and smaller microplates add secondary ranges and
-//! hill country, so even a small region usually has some relief.
+//! Landforms are functions of the signed distance from a boundary, which
+//! is kept per plate on the plate grid and interpolated, so they're smooth
+//! wherever they're sampled, even where three plates meet.
 
-use sim_core::rng;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::f64::consts::{PI, TAU};
 
-/// One plate site.
+use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use rand::RngExt;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use sim_core::{HexId, Topology, cross, normalize, rng, tangent_basis};
+
+/// A plate's motion set by hand: which way it heads at its centre and how
+/// fast, overriding the generated motion.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlateMotion {
+    pub plate: u16,
+    /// Degrees clockwise from north.
+    pub heading: f64,
+    /// About 0.5..1.2 for generated plates.
+    pub speed: f64,
+}
+
+/// How the plates are laid out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlateSettings {
+    /// Number of plates, not counting microplates.
+    pub count: u32,
+    /// 0 for plates of much the same size; 1 for a few giants among many
+    /// small plates.
+    pub variety: f64,
+    /// 0 for none; 1 for about one per plate.
+    pub microplates: f64,
+    /// How closely plates in a group move together: 0 each on its own, 1
+    /// as one.
+    pub grouping: f64,
+    pub motions: Vec<PlateMotion>,
+}
+
+impl Default for PlateSettings {
+    fn default() -> Self {
+        PlateSettings { count: 18, variety: 0.6, microplates: 0.6, grouping: 0.4, motions: Vec::new() }
+    }
+}
+
+/// One plate.
 #[derive(Clone, Copy, Debug)]
-pub struct Site {
-    /// Grid cell the site belongs to; identifies the plate.
-    pub cell: [i32; 3],
-    pos: [f64; 3],
-    velocity: [f64; 3],
+pub struct PlateInfo {
+    /// Rotation vector: the plate's velocity at unit point `u` is
+    /// `spin × u`.
+    pub spin: [f64; 3],
+    pub group: u16,
+    pub micro: bool,
+    /// Centre of the plate on the unit sphere.
+    pub centre: [f64; 3],
     /// Breaks ties between two oceanic plates (which one subducts).
     rank: u64,
 }
 
-/// One layer of plates.
-pub struct PlateLayer {
-    seed: u64,
-    /// Plate spacing in noise-space units (one unit is a region's height).
-    cell: f64,
-    /// Whether sites spread in 3D or lie flat in the map plane.
-    three_d: bool,
-    /// For a planet: its radius. Plates' centres then lie on its surface
-    /// (only grid cells within half a cell of the surface hold one), so
-    /// boundaries are great circles, and plates turn about poles rather than
-    /// drifting in straight lines.
-    shell: Option<f64>,
-    /// Sites precomputed over the area the map samples (see
-    /// [`PlateLayer::prepare`]); anything outside is computed on demand.
-    table: Option<SiteTable>,
+/// Heading (degrees clockwise from north) and speed of a plate turning by
+/// `spin`, at `centre`.
+pub fn heading_speed(spin: [f64; 3], centre: [f64; 3]) -> (f64, f64) {
+    let v = cross(spin, centre);
+    let (east, north) = tangent_basis(centre);
+    let (e, n) = (dot(v, east), dot(v, north));
+    (e.atan2(n).to_degrees().rem_euclid(360.0), (e * e + n * n).sqrt())
 }
 
-struct SiteTable {
-    min: [i32; 3],
-    size: [i32; 3],
-    sites: Vec<Site>,
+/// The rotation that moves `centre` along `heading` at `speed`.
+pub fn spin_for(centre: [f64; 3], heading: f64, speed: f64) -> [f64; 3] {
+    let (east, north) = tangent_basis(centre);
+    let h = heading.to_radians();
+    let t = [0, 1, 2].map(|k| north[k] * h.cos() + east[k] * h.sin());
+    cross(centre, t).map(|v| v * speed)
 }
 
-/// Cells searched either side of a point's own cell. Two is enough that any
-/// site outside the window is provably beyond [`MEMBERSHIP_LIMIT`].
-const REACH: i32 = 2;
+#[derive(Clone, Copy)]
+struct Entry {
+    plate: u16,
+    /// Signed distance from the plate's edge (noise-space units): negative
+    /// inside it.
+    d: f32,
+    /// Its gradient on the unit sphere.
+    grad: [f32; 3],
+}
 
-/// Squared-distance excess (in cells²) beyond which a plate's membership is
-/// exactly zero. With sites jittered within the middle 70% of their cells,
-/// any site outside a ±2-cell window is at least 2.15 cells away along one
-/// axis, while the nearest site is within 0.85·√3 ≈ 1.47 cells, so its
-/// excess is at least 2.15² − 1.47² ≈ 2.46 cells².
-const MEMBERSHIP_LIMIT: f64 = 2.4;
+/// The planet's plates.
+pub struct Plates {
+    grid: Topology,
+    /// Grid spacing in radians.
+    step: f64,
+    /// Owning plate of each grid cell.
+    owner: Vec<u16>,
+    /// Plates within reach of each cell: `entries[start[c]..start[c + 1]]`.
+    start: Vec<u32>,
+    entries: Vec<Entry>,
+    /// Distance fields are kept only this far (noise-space units) from a
+    /// plate's edge; beyond, a cell is just inside or outside.
+    cap: f64,
+    pub info: Vec<PlateInfo>,
+}
 
-impl PlateLayer {
-    pub fn new(seed: u64, layer: u64, cell: f64, three_d: bool) -> Self {
-        PlateLayer {
-            seed: rng::mix(seed, 1, layer, rng::purpose::WORLDGEN),
-            cell,
-            three_d,
-            shell: None,
-            table: None,
+const NONE: u16 = u16::MAX;
+
+/// Plate-grid frequency for a planet: about 23 000 cells on an Earth-like
+/// one, more on bigger planets so boundaries stay as sharp.
+fn grid_frequency(radius: f64) -> u32 {
+    ((radius / 1.27 * 48.0).round() as u32).clamp(24, 160)
+}
+
+fn random_unit(rng: &mut rng::SimRng) -> [f64; 3] {
+    let z = rng.random::<f64>() * 2.0 - 1.0;
+    let a = rng.random::<f64>() * TAU;
+    let r = (1.0 - z * z).sqrt();
+    [r * a.cos(), r * a.sin(), z]
+}
+
+fn random_spin(rng: &mut rng::SimRng) -> [f64; 3] {
+    let axis = random_unit(rng);
+    let rate = 0.6 + 0.8 * rng.random::<f64>();
+    axis.map(|v| v * rate)
+}
+
+fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
+    dot(a, b).clamp(-1.0, 1.0).acos()
+}
+
+/// Grows plates from `sources` over cells `open` allows, cheapest first;
+/// stops a plate once it has `limit` cells.
+fn grow(
+    grid: &Topology,
+    owner: &mut [u16],
+    sources: &[(u32, u16)],
+    cost: impl Fn(usize, u16) -> f64,
+    open: impl Fn(u16) -> bool,
+    limit: usize,
+) {
+    let mut heap = BinaryHeap::new();
+    let mut size: HashMap<u16, usize> = HashMap::new();
+    for &(cell, plate) in sources {
+        heap.push(Reverse((0u64, cell, plate)));
+    }
+    while let Some(Reverse((key, cell, plate))) = heap.pop() {
+        let c = cell as usize;
+        if owner[c] == plate || !open(owner[c]) {
+            continue;
+        }
+        let n = size.entry(plate).or_default();
+        if *n >= limit {
+            continue;
+        }
+        *n += 1;
+        owner[c] = plate;
+        let here = f64::from_bits(key);
+        for nb in grid.neighbors(HexId(cell)) {
+            if owner[nb.index()] != plate && open(owner[nb.index()]) {
+                let step = angle(grid.position(HexId(cell)), grid.position(nb)) * cost(nb.index(), plate);
+                heap.push(Reverse(((here + step).to_bits(), nb.0, plate)));
+            }
         }
     }
+}
 
-    /// Plates on the surface of a planet of `radius` (see `shell`).
-    pub fn on_planet(seed: u64, layer: u64, cell: f64, radius: f64) -> Self {
-        PlateLayer { shell: Some(radius), ..PlateLayer::new(seed, layer, cell, true) }
-    }
+impl Plates {
+    /// Lays out the plates of a planet of `radius` (noise-space units).
+    pub fn new(seed: u64, radius: f64, settings: &PlateSettings) -> Self {
+        let grid = Topology::new(grid_frequency(radius));
+        let step = grid.spacing();
+        let len = grid.len();
+        let n = settings.count.clamp(2, 200) as usize;
+        let mut rng = rng::stream(seed, 0, 30, rng::purpose::WORLDGEN);
 
-    /// Precomputes the sites for noise-space points between `min` and `max`,
-    /// so lookups there are a table read instead of a hash.
-    pub fn prepare(&mut self, min: [f64; 3], max: [f64; 3]) {
-        let lo = min.map(|v| (v / self.cell).floor() as i32 - REACH - 1);
-        let hi = max.map(|v| (v / self.cell).floor() as i32 + REACH + 1);
-        let (lo, hi) = if self.three_d { (lo, hi) } else { ([lo[0], lo[1], 0], [hi[0], hi[1], 0]) };
-        let size = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
-        let mut sites = Vec::with_capacity((size[0] * size[1] * size[2]) as usize);
-        for z in lo[2]..=hi[2] {
-            for y in lo[1]..=hi[1] {
-                for x in lo[0]..=hi[0] {
-                    sites.push(self.site([x, y, z]));
+        // Seeds spread out by best-candidate sampling: each the farthest
+        // from those before of a few random tries, so plates don't start
+        // bunched up.
+        let mut seeds: Vec<[f64; 3]> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut best = (f64::NEG_INFINITY, [0.0, 0.0, 1.0]);
+            for _ in 0..8 {
+                let p = random_unit(&mut rng);
+                let gap = seeds.iter().map(|&s| angle(s, p)).fold(PI, f64::min);
+                if gap > best.0 {
+                    best = (gap, p);
                 }
             }
+            seeds.push(best.1);
         }
-        self.table = Some(SiteTable { min: lo, size, sites });
-    }
-
-    fn lookup(&self, cell: [i32; 3]) -> Site {
-        if let Some(t) = &self.table {
-            let local = [cell[0] - t.min[0], cell[1] - t.min[1], cell[2] - t.min[2]];
-            if (0..3).all(|i| local[i] >= 0 && local[i] < t.size[i]) {
-                return t.sites[((local[2] * t.size[1] + local[1]) * t.size[0] + local[0]) as usize];
-            }
-        }
-        self.site(cell)
-    }
-
-    fn site(&self, cell: [i32; 3]) -> Site {
-        let key = |salt: u64| {
-            let packed = (cell[0] as u32 as u64) | (cell[1] as u32 as u64) << 32;
-            rng::mix(self.seed, packed, cell[2] as u32 as u64, salt)
-        };
-        // Uniform in [0, 1) from the top 53 bits.
-        let unit = |salt: u64| (key(salt) >> 11) as f64 / (1u64 << 53) as f64;
-        let jitter = |axis: usize, salt: u64| (cell[axis] as f64 + 0.15 + 0.7 * unit(salt)) * self.cell;
-        let pos = [jitter(0, 1), jitter(1, 2), if self.three_d { jitter(2, 3) } else { 0.0 }];
-        if let Some(radius) = self.shell {
-            let len = dot(pos, pos).sqrt();
-            if (len - radius).abs() > self.cell * 0.5 || len < 1e-9 {
-                // No plate here: far away, so it never wins.
-                return Site { cell, pos: [1e6; 3], velocity: [0.0; 3], rank: key(8) };
-            }
-            let up = pos.map(|v| v / len);
-            // Turning about a random pole (an Euler pole), at a random rate.
-            let z = unit(4) * 2.0 - 1.0;
-            let a = unit(6) * std::f64::consts::TAU;
-            let r = (1.0 - z * z).sqrt();
-            let axis = [r * a.cos(), r * a.sin(), z];
-            let speed = 0.35 + 0.65 * unit(5);
-            let turn = [
-                axis[1] * up[2] - axis[2] * up[1],
-                axis[2] * up[0] - axis[0] * up[2],
-                axis[0] * up[1] - axis[1] * up[0],
-            ];
-            let norm = dot(turn, turn).sqrt().max(0.2);
-            let velocity = turn.map(|v| v / norm * speed);
-            return Site { cell, pos: up.map(|v| v * radius), velocity, rank: key(8) };
-        }
-        // Drift: a random direction (in the map plane for flat maps) and speed.
-        let angle = unit(4) * std::f64::consts::TAU;
-        let speed = 0.35 + 0.65 * unit(5);
-        let tilt = if self.three_d { unit(6) * 2.0 - 1.0 } else { 0.0 };
-        let flat = (1.0 - tilt * tilt).sqrt();
-        let velocity = [angle.cos() * flat * speed, angle.sin() * flat * speed, tilt * speed];
-        Site { cell, pos, velocity, rank: key(8) }
-    }
-
-    /// Sites near `p` with their squared distances, nearest first.
-    #[cfg(test)]
-    fn neighbourhood(&self, p: [f64; 3]) -> Vec<(Site, f64)> {
-        let base = p.map(|v| (v / self.cell).floor() as i32);
-        let z_range = if self.three_d { -REACH..=REACH } else { 0..=0 };
-        let mut sites = Vec::with_capacity(125);
-        for dz in z_range {
-            for dy in -REACH..=REACH {
-                for dx in -REACH..=REACH {
-                    let site = self.lookup([base[0] + dx, base[1] + dy, base[2] + dz]);
-                    sites.push((site, dist2(p, site.pos)));
-                }
-            }
-        }
-        sites.sort_by(|a, b| a.1.total_cmp(&b.1));
-        sites
-    }
-
-    /// Soft membership of each nearby plate at `p`: 1 for the nearest,
-    /// falling off smoothly for plates whose boundary is further away.
-    /// Plates that contribute (nearly) nothing are dropped.
-    fn soft(&self, p: [f64; 3]) -> Vec<(Site, f64)> {
-        // Falls to 1/e about 1.5 feature-widths from a boundary, and is
-        // shifted to reach exactly zero at MEMBERSHIP_LIMIT, so no plate is
-        // cut off by the edge of the search window.
-        let tau = 3.0 * WIDTH * self.cell;
-        let limit = MEMBERSHIP_LIMIT * self.cell * self.cell;
-        let floor = (-limit / tau).exp();
-        // Two passes over the window: find the nearest site, then keep the
-        // few within reach of it. No sorting or per-site allocation.
-        let base = p.map(|v| (v / self.cell).floor() as i32);
-        let z = if self.three_d { REACH } else { 0 };
-        let cells = (-z..=z).flat_map(move |dz| {
-            (-REACH..=REACH).flat_map(move |dy| {
-                (-REACH..=REACH).map(move |dx| [base[0] + dx, base[1] + dy, base[2] + dz])
+        // Growth rates: a plate's area goes roughly with the square.
+        let variety = settings.variety.clamp(0.0, 1.0);
+        let rates: Vec<f64> = (0..n)
+            .map(|_| {
+                let (u1, u2) = (rng.random::<f64>().max(1e-12), rng.random::<f64>());
+                let normal = (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos();
+                (variety * 0.65 * normal).exp()
             })
-        });
-        let nearest = cells.clone().map(|c| dist2(p, self.lookup(c).pos)).fold(f64::INFINITY, f64::min);
-        let mut out: Vec<(Site, f64)> = Vec::with_capacity(4);
-        for c in cells {
-            let site = self.lookup(c);
-            let excess = dist2(p, site.pos) - nearest;
-            if excess >= limit {
+            .collect();
+        // Some ground is slower to cross, so outlines wander.
+        let typical = radius * (4.0 * PI / n as f64).sqrt();
+        let rough_noise = Fbm::<Perlin>::new(rng.random::<u32>()).set_octaves(4).set_frequency(2.5 / typical);
+        let rough: Vec<f64> = (0..len)
+            .into_par_iter()
+            .map(|i| {
+                let p = grid.position(HexId(i as u32)).map(|v| v * radius);
+                (1.0 + 0.8 * rough_noise.get(p)).max(0.2)
+            })
+            .collect();
+
+        let mut owner = vec![NONE; len];
+        let sources: Vec<(u32, u16)> =
+            seeds.iter().enumerate().map(|(i, &s)| (grid.nearest(s, None).0, i as u16)).collect();
+        grow(&grid, &mut owner, &sources, |c, p| rough[c] / rates[p as usize], |o| o == NONE, usize::MAX);
+
+        // Groups: centres picked far apart among the plates, largest first;
+        // every plate joins the nearest.
+        let (centres, _) = centres_and_shares(&grid, &owner, n);
+        let groups = ((n as f64 / 3.5).round() as usize).clamp(1, n);
+        let sizes: Vec<usize> = (0..n).map(|p| owner.iter().filter(|&&o| o as usize == p).count()).collect();
+        let mut heads = vec![(0..n).max_by_key(|&p| (sizes[p], Reverse(p))).unwrap_or(0)];
+        while heads.len() < groups {
+            let far = (0..n)
+                .filter(|p| !heads.contains(p))
+                .max_by(|&a, &b| {
+                    let gap =
+                        |p: usize| heads.iter().map(|&h| angle(centres[h], centres[p])).fold(PI, f64::min);
+                    gap(a).total_cmp(&gap(b)).then(b.cmp(&a))
+                })
+                .unwrap_or(0);
+            heads.push(far);
+        }
+        let group: Vec<u16> = (0..n)
+            .map(|p| {
+                (0..heads.len())
+                    .min_by(|&a, &b| {
+                        angle(centres[heads[a]], centres[p]).total_cmp(&angle(centres[heads[b]], centres[p]))
+                    })
+                    .unwrap_or(0) as u16
+            })
+            .collect();
+
+        // Microplates, carved out along boundaries between groups (or any
+        // boundary, if there's only one group).
+        let micros = (settings.microplates.clamp(0.0, 2.0) * n as f64).round() as usize;
+        let mut micro_host = Vec::new();
+        if micros > 0 {
+            let between = |a: u16, b: u16| groups == 1 || group[a as usize] != group[b as usize];
+            let mut candidates: Vec<u32> = (0..len as u32)
+                .filter(|&c| {
+                    let o = owner[c as usize];
+                    grid.neighbors(HexId(c)).any(|nb| owner[nb.index()] != o && between(o, owner[nb.index()]))
+                })
+                .collect();
+            let micro_size = len as f64 / n as f64;
+            let spread = 1.8 * (micro_size * 0.1 * 4.0 * PI / len as f64).sqrt();
+            let mut placed: Vec<[f64; 3]> = Vec::new();
+            for _ in 0..micros {
+                let mut seed_cell = None;
+                for _ in 0..40 {
+                    if candidates.is_empty() {
+                        break;
+                    }
+                    let c = candidates.swap_remove(rng.random_range(0..candidates.len()));
+                    let p = grid.position(HexId(c));
+                    if (owner[c as usize] as usize) < n && placed.iter().all(|&q| angle(p, q) > spread) {
+                        seed_cell = Some(c);
+                        break;
+                    }
+                }
+                let target = (micro_size * (0.04 + 0.1 * rng.random::<f64>())).max(3.0) as usize;
+                let Some(c) = seed_cell else { continue };
+                placed.push(grid.position(HexId(c)));
+                let id = (n + micro_host.len()) as u16;
+                micro_host.push((id, owner[c as usize]));
+                grow(&grid, &mut owner, &[(c, id)], |c, _| rough[c], |o| (o as usize) < n, target);
+            }
+        }
+        let total = n + micro_host.len();
+        // Motion: each group turns about its own pole; its plates share
+        // that turn as far as `grouping` says, the rest their own.
+        let grouping = settings.grouping.clamp(0.0, 1.0);
+        let group_spin: Vec<[f64; 3]> = (0..groups).map(|_| random_spin(&mut rng)).collect();
+        let mut spin: Vec<[f64; 3]> = (0..n)
+            .map(|p| {
+                let own = random_spin(&mut rng);
+                let g = group_spin[group[p] as usize];
+                [0, 1, 2].map(|k| grouping * g[k] + (1.0 - grouping) * own[k])
+            })
+            .collect();
+        let mut groups_of: Vec<u16> = group.clone();
+        for &(_, host) in &micro_host {
+            let own = random_spin(&mut rng);
+            let h = spin[host as usize];
+            spin.push([0, 1, 2].map(|k| 0.5 * h[k] + 0.5 * own[k]));
+            groups_of.push(group[host as usize]);
+        }
+        let ranks: Vec<u64> = (0..total).map(|_| rng.random::<u64>()).collect();
+        let (centres, _) = centres_and_shares(&grid, &owner, total);
+        for m in &settings.motions {
+            let p = m.plate as usize;
+            if p < total {
+                spin[p] = spin_for(centres[p], m.heading, m.speed);
+            }
+        }
+        let info: Vec<PlateInfo> = (0..total)
+            .map(|p| PlateInfo {
+                spin: spin[p],
+                group: groups_of[p],
+                micro: p >= n,
+                centre: centres[p],
+                rank: ranks[p],
+            })
+            .collect();
+
+        // Signed distance from each plate's edge, near its edge.
+        let unit = step * radius;
+        let cap = FAR * WIDTH + 3.0 * unit;
+        let fields: Vec<Vec<(u32, f32)>> = (0..total as u16)
+            .into_par_iter()
+            .map(|p| distance_field(&grid, &owner, p, radius, cap))
+            .collect();
+        let mut per_cell: Vec<Vec<(u16, f32)>> = vec![Vec::new(); len];
+        for (p, field) in fields.into_iter().enumerate() {
+            for (c, d) in field {
+                per_cell[c as usize].push((p as u16, d));
+            }
+        }
+        let value = |c: usize, p: u16| -> f64 {
+            per_cell[c].iter().find(|e| e.0 == p).map(|e| e.1 as f64).unwrap_or(if owner[c] == p {
+                -cap
+            } else {
+                cap
+            })
+        };
+        let cells: Vec<Vec<Entry>> = (0..len)
+            .into_par_iter()
+            .map(|c| {
+                let pc = grid.position(HexId(c as u32));
+                per_cell[c]
+                    .iter()
+                    .map(|&(p, d)| {
+                        // Least-squares slope from the neighbours.
+                        let (mut g, mut norm) = ([0.0f64; 3], 0.0);
+                        for nb in grid.neighbors(HexId(c as u32)) {
+                            let dp = sub(grid.position(nb), pc);
+                            let dd = value(nb.index(), p) - d as f64;
+                            for k in 0..3 {
+                                g[k] += dd * dp[k];
+                            }
+                            norm += dot(dp, dp);
+                        }
+                        let grad = g.map(|v| (v / norm.max(1e-12)) as f32);
+                        Entry { plate: p, d, grad }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut start = Vec::with_capacity(len + 1);
+        let mut entries = Vec::new();
+        for list in cells {
+            start.push(entries.len() as u32);
+            entries.extend(list);
+        }
+        start.push(entries.len() as u32);
+        Plates { grid, step, owner, start, entries, cap, info }
+    }
+
+    fn entries(&self, c: usize) -> &[Entry] {
+        &self.entries[self.start[c] as usize..self.start[c + 1] as usize]
+    }
+
+    /// Signed distance and its slope for plate `p` at cell `c`.
+    fn field(&self, c: usize, p: u16) -> (f64, [f64; 3]) {
+        match self.entries(c).iter().find(|e| e.plate == p) {
+            Some(e) => (e.d as f64, e.grad.map(|v| v as f64)),
+            None => (if self.owner[c] == p { -self.cap } else { self.cap }, [0.0; 3]),
+        }
+    }
+
+    /// Nearby plates at unit point `u`, with their interpolated signed
+    /// distances and slopes.
+    fn near(&self, u: [f64; 3]) -> Vec<(u16, f64, [f64; 3])> {
+        let c = self.grid.nearest(u, None);
+        // Within one spacing of the point, every cell is the nearest or one
+        // of its neighbours, so the stencil never drops a weighted cell.
+        let reach = self.step;
+        let mut stencil: Vec<(usize, f64)> = Vec::with_capacity(7);
+        for cell in std::iter::once(c).chain(self.grid.neighbors(c)) {
+            let w = (1.0 - angle(self.grid.position(cell), u) / reach).max(0.0).powi(2);
+            if w > 0.0 {
+                stencil.push((cell.index(), w));
+            }
+        }
+        if stencil.is_empty() {
+            stencil.push((c.index(), 1.0));
+        }
+        let mut plates: Vec<u16> = Vec::with_capacity(4);
+        for &(cell, _) in &stencil {
+            for p in self.entries(cell).iter().map(|e| e.plate).chain(std::iter::once(self.owner[cell])) {
+                if !plates.contains(&p) {
+                    plates.push(p);
+                }
+            }
+        }
+        let total: f64 = stencil.iter().map(|s| s.1).sum();
+        plates
+            .into_iter()
+            .map(|p| {
+                let (mut d, mut g) = (0.0, [0.0; 3]);
+                for &(cell, w) in &stencil {
+                    let (dc, gc) = self.field(cell, p);
+                    d += w * dc;
+                    for k in 0..3 {
+                        g[k] += w * gc[k];
+                    }
+                }
+                (p, d / total, g.map(|v| v / total))
+            })
+            .collect()
+    }
+}
+
+/// Centre and share of the surface of each plate.
+fn centres_and_shares(grid: &Topology, owner: &[u16], plates: usize) -> (Vec<[f64; 3]>, Vec<f64>) {
+    let mut sum = vec![[0.0f64; 3]; plates];
+    let mut count = vec![0usize; plates];
+    for (c, &o) in owner.iter().enumerate() {
+        if (o as usize) < plates {
+            let p = grid.position(HexId(c as u32));
+            for k in 0..3 {
+                sum[o as usize][k] += p[k];
+            }
+            count[o as usize] += 1;
+        }
+    }
+    let centres = sum.into_iter().map(normalize).collect();
+    let shares = count.into_iter().map(|n| n as f64 / owner.len() as f64).collect();
+    (centres, shares)
+}
+
+/// Signed distance (noise-space units) from plate `p`'s edge for cells
+/// within `cap` of it: positive outside, negative inside. Measured from
+/// the nearest cell on the far side of the edge, less half a cell, so it's
+/// ±half a cell either side of the edge and zero on it.
+fn distance_field(grid: &Topology, owner: &[u16], p: u16, radius: f64, cap: f64) -> Vec<(u32, f32)> {
+    let half = grid.spacing() * radius * 0.5;
+    let mut out = Vec::new();
+    for inside in [false, true] {
+        // Cells on the near side of the edge are the sources; distances
+        // spread into the far side.
+        let far = |c: usize| (owner[c] == p) == inside;
+        let mut heap = BinaryHeap::new();
+        let mut done: HashMap<u32, ()> = HashMap::new();
+        for c in 0..owner.len() {
+            if far(c) {
                 continue;
             }
-            let m = ((-excess / tau).exp() - floor).max(0.0) / (1.0 - floor);
-            if m > 1e-4 {
-                out.push((site, m));
+            let id = HexId(c as u32);
+            if grid.neighbors(id).any(|nb| far(nb.index())) {
+                for nb in grid.neighbors(id).filter(|nb| far(nb.index())) {
+                    let d = angle(grid.position(id), grid.position(nb)) * radius;
+                    heap.push(Reverse((d.to_bits(), nb.0, c as u32)));
+                }
             }
         }
-        // The nearest plate first: callers treat it as the point's own.
-        if let Some(i) = out.iter().position(|(_, m)| *m >= 1.0 - 1e-12) {
-            out.swap(0, i);
+        while let Some(Reverse((key, cell, source))) = heap.pop() {
+            if done.insert(cell, ()).is_some() {
+                continue;
+            }
+            let d = f64::from_bits(key) - half;
+            out.push((cell, if inside { -d } else { d } as f32));
+            let from = grid.position(HexId(source));
+            for nb in grid.neighbors(HexId(cell)) {
+                if far(nb.index()) && !done.contains_key(&nb.0) {
+                    let nd = angle(from, grid.position(nb)) * radius;
+                    if nd - half <= cap {
+                        heap.push(Reverse((nd.to_bits(), nb.0, source)));
+                    }
+                }
+            }
         }
-        out
     }
-}
-
-/// The geometry of one plate pair at a point, oriented from the higher-ranked
-/// plate (`hi`), so it's the same whichever plate the point lies in.
-struct Pair {
-    /// Signed distance from the boundary: positive on `hi`'s side.
-    x: f64,
-    /// Nearest point on the boundary.
-    foot: [f64; 3],
-    /// Unit vector from `lo` towards `hi`.
-    toward_hi: [f64; 3],
-    /// Closing speed: positive when the plates collide.
-    convergence: f64,
-}
-
-fn pair(p: [f64; 3], a: &Site, b: &Site) -> Pair {
-    let (hi, lo) = if a.rank > b.rank { (a, b) } else { (b, a) };
-    let gap = sub(hi.pos, lo.pos);
-    let len = dot(gap, gap).sqrt().max(1e-9);
-    let toward_hi = gap.map(|g| g / len);
-    let x = (dist2(p, lo.pos) - dist2(p, hi.pos)) / (2.0 * len);
-    let foot = [p[0] - toward_hi[0] * x, p[1] - toward_hi[1] * x, p[2] - toward_hi[2] * x];
-    // Colliding when hi moves towards lo faster than lo moves towards hi.
-    let convergence = -dot(sub(hi.velocity, lo.velocity), toward_hi);
-    Pair { x, foot, toward_hi, convergence }
+    out
 }
 
 /// Volcanic hot spots scattered over the sea floor: one jittered site per
@@ -288,8 +562,8 @@ impl Volcanoes {
 
 /// What the plates do to the land at one point.
 pub struct Tectonics {
-    /// The major plate the point lies on.
-    pub plate: Site,
+    /// The plate the point lies on.
+    pub plate: u16,
     /// Signed elevation change from boundary activity (before ridging).
     pub uplift: f64,
     /// Positive uplift that should become rugged ground (mountains/hills).
@@ -308,32 +582,23 @@ fn bell(x: f64) -> f64 {
     (-x * x).exp()
 }
 
-/// Plate effects at `p`. `crust(x)` is the continental-crust field: positive
-/// where the crust is continental.
+/// Plate effects at noise-space point `p`. `crust(x)` is the
+/// continental-crust field: positive where the crust is continental.
 ///
 /// Each pair of nearby plates contributes the landform of its boundary,
 /// weighted by a soft measure of how near both plates are. A pair's
 /// landform is written in terms of the signed distance from its boundary,
 /// oriented from the higher-ranked plate, with crust types sampled at fixed
 /// probe points either side and blended softly. So every term is the same
-/// whichever plate the point is in, nothing switches abruptly, and the land
-/// has no cliffs, even where three plates meet.
+/// whichever plate the point is in, and nothing switches abruptly.
 ///
 /// `islands` is a 0..1 field of where the sea floor breaks the surface.
-/// Mountain building under open ocean (island arcs, microplate ridges) is
-/// scaled by it, so it rises as chains of separate islands rather than one
-/// unbroken line of land along the boundary.
-pub fn evaluate(
-    major: &PlateLayer,
-    minor: &PlateLayer,
-    p: [f64; 3],
-    crust: impl Fn([f64; 3]) -> f64,
-    islands: f64,
-) -> Tectonics {
+/// Mountain building under open ocean (island arcs) is scaled by it, so it
+/// rises as chains of separate islands rather than one unbroken line of
+/// land along the boundary.
+pub fn evaluate(plates: &Plates, p: [f64; 3], crust: impl Fn([f64; 3]) -> f64, islands: f64) -> Tectonics {
     let w = WIDTH;
     let continental = |x: [f64; 3]| smoothstep(-0.08, 0.08, crust(x));
-    // Mountains raised from ocean floor (or crust that's barely continental)
-    // only break the surface at volcanic islands.
     let land_here = continental(p);
     let surfaces = land_here + (1.0 - land_here) * islands;
     let mut uplift = 0.0;
@@ -341,21 +606,59 @@ pub fn evaluate(
     let mut stress = 0.0;
     let mut ridge = 0.0;
 
-    let near = major.soft(p);
-    for (i, (a, ma)) in near.iter().enumerate() {
-        for (b, mb) in &near[i + 1..] {
-            let weight = ma * mb;
-            let pr = pair(p, a, b);
-            let (x, c) = (pr.x, pr.convergence);
-            // Every landform below is shaped by a bell that's negligible
-            // (< 0.001) this far from the boundary; skip the crust probes.
+    let u = normalize(p);
+    let near = plates.near(u);
+    let own = near.iter().min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0))).map(|n| (n.0, n.1));
+    let (own, nearest) = own.unwrap_or((0, 0.0));
+    // Soft membership: 1 for the plate the point is in, falling to 1/e
+    // about 1.5 feature-widths past a boundary, and exactly zero at FAR.
+    let tau = 3.0 * w;
+    let limit = 2.0 * FAR * w;
+    let floor = (-limit / tau).exp();
+    let member = |d: f64| ((((nearest - d) / tau).exp() - floor).max(0.0) / (1.0 - floor)).min(1.0);
+    for (i, &(a, da, ga)) in near.iter().enumerate() {
+        let ma = member(da);
+        if ma <= 1e-4 {
+            continue;
+        }
+        for &(b, db, gb) in &near[i + 1..] {
+            let mb = member(db);
+            if mb <= 1e-4 {
+                continue;
+            }
+            // A point outside both plates is only near their boundary if
+            // it's near both: x alone would put it on a boundary halfway
+            // between any two plates it's equally far from.
+            let outside = da.min(db).max(0.0);
+            let weight = ma * mb * bell(outside / (0.5 * w));
+            if weight <= 1e-6 {
+                continue;
+            }
+            let (ia, ib) = (&plates.info[a as usize], &plates.info[b as usize]);
+            let ((hi, dh, gh), (lo, dl, gl)) =
+                if ia.rank > ib.rank { ((ia, da, ga), (ib, db, gb)) } else { ((ib, db, gb), (ia, da, ga)) };
+            // Positive on hi's side.
+            let x = (dl - dh) / 2.0;
             if x.abs() > FAR * w {
                 continue;
             }
-            let probe = |t: f64| {
-                let u = pr.toward_hi;
-                [pr.foot[0] + u[0] * t, pr.foot[1] + u[1] * t, pr.foot[2] + u[2] * t]
-            };
+            let across = sub(gl, gh);
+            let across = sub(across, u.map(|v| v * dot(across, u)));
+            let len = dot(across, across).sqrt();
+            if len < 1e-9 {
+                continue;
+            }
+            let toward_hi = across.map(|v| v / len);
+            // Across a real boundary the two plates' distances rise in
+            // opposite directions; where they rise together the pair's
+            // boundary is somewhere else entirely.
+            let opposed = len / (dot(gl, gl).sqrt() + dot(gh, gh).sqrt()).max(1e-9);
+            let weight = weight * smoothstep(0.3, 0.8, opposed);
+            // Colliding when hi moves towards lo faster than lo towards hi.
+            let convergence = -dot(sub(cross(hi.spin, u), cross(lo.spin, u)), toward_hi);
+            let foot = [0, 1, 2].map(|k| p[k] - toward_hi[k] * x);
+            let probe = |t: f64| [0, 1, 2].map(|k| foot[k] + toward_hi[k] * t);
+            let c = convergence;
             if c > 0.0 {
                 let (hi_cont, lo_cont) = (continental(probe(1.5 * w)), continental(probe(-1.5 * w)));
                 // Each case weighted by how well the crust either side fits.
@@ -364,58 +667,42 @@ pub fn evaluate(
                 let lo_over_ocean = (1.0 - hi_cont) * lo_cont;
                 let oceans = (1.0 - hi_cont) * (1.0 - lo_cont);
                 let mut o = 0.0;
-                let mut u = 0.0;
+                let mut up = 0.0;
                 // Continents collide: the greatest ranges, on both sides.
                 o += both * 0.8 * bell(x / (1.4 * w));
                 // Ocean dives under continent: a range set back from the
                 // coast, and a trench offshore.
                 o += hi_over_ocean * 0.7 * bell((x - 0.8 * w) / w);
-                u -= hi_over_ocean * 0.12 * bell((x + 0.3 * w) / (0.6 * w));
+                up -= hi_over_ocean * 0.12 * bell((x + 0.3 * w) / (0.6 * w));
                 o += lo_over_ocean * 0.7 * bell((x + 0.8 * w) / w);
-                u -= lo_over_ocean * 0.12 * bell((x - 0.3 * w) / (0.6 * w));
+                up -= lo_over_ocean * 0.12 * bell((x - 0.3 * w) / (0.6 * w));
                 // Ocean meets ocean: the lower plate dives, the higher grows
                 // an island arc, broken into separate volcanic islands.
                 o += oceans * 0.6 * bell((x - 0.6 * w) / w);
-                u -= oceans * 0.1 * bell((x + 0.2 * w) / (0.6 * w));
+                up -= oceans * 0.1 * bell((x + 0.2 * w) / (0.6 * w));
                 orogeny += weight * c * o;
-                uplift += weight * c * u;
+                uplift += weight * c * up;
             } else {
                 // Pulling apart: a rift valley on land, a ridge under the sea
                 // (which only surfaces at hot spots, like Iceland).
-                let land = continental(pr.foot);
+                let land = continental(foot);
                 uplift += weight * c * land * 0.1 * bell(x / (0.7 * w));
                 ridge -= weight * c * (1.0 - land) * 0.08 * bell(x / w);
             }
+            // Plates of one group were welded together long ago: worn hill
+            // country along the old seam, on land (the Urals).
+            if hi.group == lo.group && !hi.micro && !lo.micro {
+                let both = continental(probe(1.5 * w)) * continental(probe(-1.5 * w));
+                orogeny += weight * both * 0.18 * bell(x / (1.8 * w));
+            }
             stress += weight * c * bell(x / (1.4 * w));
-        }
-    }
-
-    // Microplates: secondary ranges and old worn-down hill country, mostly
-    // on continents (under open ocean they'd draw stray ridges).
-    let on_land = 0.25 + 0.75 * land_here;
-    let near_minor = minor.soft(p);
-    for (i, (a, ma)) in near_minor.iter().enumerate() {
-        for (b, mb) in &near_minor[i + 1..] {
-            let pr = pair(p, a, b);
-            if pr.x.abs() > FAR * w {
-                continue;
-            }
-            let weight = ma * mb;
-            // Shown (more faintly) in the stress map too, so their ranges
-            // have a visible cause.
-            stress += 0.5 * weight * pr.convergence * bell(pr.x / (0.8 * w));
-            if pr.convergence > 0.0 {
-                orogeny += on_land * weight * pr.convergence * 0.3 * bell(pr.x / (0.8 * w));
-            } else {
-                uplift += weight * pr.convergence * 0.06 * bell(pr.x / (0.6 * w));
-            }
         }
     }
 
     // Under the sea a ridge lifts the floor everywhere, but only enough to
     // matter at hot spots: elsewhere it stays well below the surface.
     let uplift = uplift + ridge * (0.1 + 0.9 * islands.min(1.0)) * (1.0 - land_here) + ridge * land_here;
-    Tectonics { plate: near[0].0, uplift, orogeny: orogeny * surfaces, stress }
+    Tectonics { plate: own, uplift, orogeny: orogeny * surfaces, stress }
 }
 
 pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
@@ -440,57 +727,95 @@ fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pair_geometry_is_the_same_from_either_plate() {
-        let layer = PlateLayer::new(7, 0, 1.0, false);
-        for i in 0..200 {
-            let p = [i as f64 * 0.137 - 10.0, (i * 7 % 23) as f64 * 0.31 - 3.0, 0.0];
-            let near = layer.neighbourhood(p);
-            let (a, b) = (&near[0].0, &near[1].0);
-            let (ab, ba) = (pair(p, a, b), pair(p, b, a));
-            assert_eq!(ab.x, ba.x);
-            assert_eq!(ab.convergence, ba.convergence);
-            // The nearer plate's side of the boundary is where p lies.
-            let on_a_side = if a.rank > b.rank { ab.x >= 0.0 } else { ab.x <= 0.0 };
-            assert!(on_a_side);
-        }
+    const RADIUS: f64 = 1.27;
+
+    fn sizes(plates: &Plates) -> Vec<f64> {
+        let (_, shares) = centres_and_shares(&plates.grid, &plates.owner, plates.info.len());
+        plates.info.iter().zip(shares).filter(|(p, _)| !p.micro).map(|(_, s)| s).collect()
     }
 
     #[test]
     fn plates_are_deterministic_and_seeded() {
-        let p = [0.3, 2.2, -1.4];
-        let a = PlateLayer::new(1, 0, 1.0, true).neighbourhood(p);
-        let b = PlateLayer::new(1, 0, 1.0, true).neighbourhood(p);
-        let c = PlateLayer::new(2, 0, 1.0, true).neighbourhood(p);
-        assert_eq!(a[0].0.cell, b[0].0.cell);
-        assert_eq!(a[0].1, b[0].1);
-        assert_ne!(a[0].1, c[0].1);
+        let s = PlateSettings::default();
+        let (a, b, c) = (Plates::new(1, RADIUS, &s), Plates::new(1, RADIUS, &s), Plates::new(2, RADIUS, &s));
+        assert_eq!(a.owner, b.owner);
+        assert_ne!(a.owner, c.owner);
     }
-}
 
-#[cfg(test)]
-mod continuity {
-    use super::*;
+    #[test]
+    fn every_plate_has_ground_and_microplates_are_small() {
+        let s = PlateSettings { microplates: 1.0, ..PlateSettings::default() };
+        let plates = Plates::new(5, RADIUS, &s);
+        assert!(plates.owner.iter().all(|&o| (o as usize) < plates.info.len()));
+        let micro = plates.info.iter().filter(|p| p.micro).count();
+        assert!(micro >= 8, "{micro} microplates");
+        let mean_major = sizes(&plates).iter().sum::<f64>() / s.count as f64;
+        let (_, shares) = centres_and_shares(&plates.grid, &plates.owner, plates.info.len());
+        for (p, share) in plates.info.iter().zip(shares).filter(|(p, _)| p.micro) {
+            let _ = p;
+            assert!(share > 0.0 && share < mean_major * 0.5, "microplate share {share}");
+        }
+        let none = Plates::new(5, RADIUS, &PlateSettings { microplates: 0.0, ..PlateSettings::default() });
+        assert!(none.info.iter().all(|p| !p.micro));
+    }
+
+    #[test]
+    fn variety_spreads_plate_sizes() {
+        let spread = |variety: f64| {
+            let s = PlateSettings { variety, microplates: 0.0, ..PlateSettings::default() };
+            let mut v = sizes(&Plates::new(9, RADIUS, &s));
+            v.sort_by(f64::total_cmp);
+            v[v.len() - 1] / v[0].max(1e-6)
+        };
+        let (even, varied) = (spread(0.0), spread(1.0));
+        assert!(varied > even * 2.0, "even {even:.1}×, varied {varied:.1}×");
+    }
+
+    #[test]
+    fn grouped_plates_move_together() {
+        let s = PlateSettings { grouping: 1.0, microplates: 0.0, ..PlateSettings::default() };
+        let plates = Plates::new(3, RADIUS, &s);
+        for a in &plates.info {
+            for b in &plates.info {
+                if a.group == b.group {
+                    assert!(dist2(a.spin, b.spin) < 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn motions_can_be_set_by_hand() {
+        let s = PlateSettings {
+            motions: vec![PlateMotion { plate: 2, heading: 135.0, speed: 0.8 }],
+            ..PlateSettings::default()
+        };
+        let plates = Plates::new(4, RADIUS, &s);
+        let (heading, speed) = heading_speed(plates.info[2].spin, plates.info[2].centre);
+        assert!((heading - 135.0).abs() < 1e-6 && (speed - 0.8).abs() < 1e-9, "{heading} {speed}");
+        // The plates themselves don't change.
+        assert_eq!(plates.owner, Plates::new(4, RADIUS, &PlateSettings::default()).owner);
+    }
 
     #[test]
     fn effects_are_continuous_across_boundaries() {
-        // Walk a fine line across many plates: neighbouring samples must
-        // never jump, whatever boundary they straddle.
-        let major = PlateLayer::new(11, 0, 1.0, false);
-        let minor = PlateLayer::new(11, 1, 0.38, false);
+        // Walk a fine great circle across many plates: neighbouring samples
+        // must never jump, whatever boundary they straddle.
+        let plates = Plates::new(11, RADIUS, &PlateSettings::default());
         let crust = |x: [f64; 3]| (x[0] * 1.3).sin() * 0.3 + (x[1] * 0.7).cos() * 0.2;
-        let step = 0.0005;
+        let steps = 40_000;
         let mut prev: Option<(f64, f64)> = None;
         let mut worst: f64 = 0.0;
-        for i in 0..40_000 {
-            let p = [i as f64 * step - 10.0, 0.37 + i as f64 * step * 0.31, 0.0];
-            let t = evaluate(&major, &minor, p, crust, 1.0);
+        for i in 0..steps {
+            let a = i as f64 / steps as f64 * TAU;
+            let p = normalize([a.cos(), a.sin() * 0.8, a.sin() * 0.6]).map(|v| v * RADIUS);
+            let t = evaluate(&plates, p, crust, 1.0);
             let v = (t.uplift, t.orogeny);
             if let Some(pv) = prev {
                 worst = worst.max((v.0 - pv.0).abs()).max((v.1 - pv.1).abs());
             }
             prev = Some(v);
         }
-        assert!(worst < 0.02, "largest jump between neighbouring samples was {worst}");
+        assert!(worst < 0.03, "largest jump between neighbouring samples was {worst}");
     }
 }

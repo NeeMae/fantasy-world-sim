@@ -31,8 +31,10 @@ Controls
   Space, 1-5                    pause, speed
 
 The World panel on the right generates new worlds: try Planet size,
-Continents, Detail, Sea level, Temperature, Rainfall, Mountains, Erosion and
-Inland seas, then "Regenerate world".
+Continents, Detail, Sea level, Temperature, Rainfall, Mountains, Erosion,
+Inland seas and the plate settings, then "Regenerate world". In the Plates
+map view, select a hex to see its plate; you can set the plate's heading
+and speed by hand and Apply to regenerate the world with that motion.
 
 The Esc menu saves, loads and deletes saved worlds, and asks before
 throwing away unsaved changes. Saves are kept in

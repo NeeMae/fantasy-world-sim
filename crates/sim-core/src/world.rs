@@ -89,8 +89,17 @@ impl Terrain {
 /// A tectonic plate.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plate {
-    /// Whether most of the plate (on this map) is land.
+    /// Whether most of the plate is land.
     pub continental: bool,
+    /// Plates of a group drift together.
+    pub group: u16,
+    /// A small plate carved out along a boundary.
+    pub micro: bool,
+    /// Rotation vector: the plate's velocity at a unit point `u` is
+    /// `spin × u`.
+    pub spin: [f32; 3],
+    /// Centre of the plate on the unit sphere.
+    pub centre: [f32; 3],
 }
 
 /// The world's tectonic plates, as generated. Kept for display now, and for
@@ -140,7 +149,13 @@ impl World {
     pub fn new(seed: u64, topology: Topology, terrain: Terrain) -> Self {
         assert_eq!(topology.len(), terrain.len(), "terrain size must match the topology");
         let geology = Geology {
-            plates: vec![Plate { continental: true }],
+            plates: vec![Plate {
+                continental: true,
+                group: 0,
+                micro: false,
+                spin: [0.0; 3],
+                centre: [0.0, 0.0, 1.0],
+            }],
             plate: vec![0; terrain.len()],
             stress: vec![0.0; terrain.len()],
         };

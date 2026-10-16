@@ -186,6 +186,9 @@ impl PlanetView {
         for outline in outlines {
             self.draw_outline(&painter, &world.topology, outline);
         }
+        if mode == MapMode::Plates {
+            self.draw_plate_motion(&painter, world);
+        }
 
         let hover = response.hover_pos().and_then(|pos| self.hex_at(&world.topology, pos));
         let primary_down = ui.input(|i| i.pointer.primary_down());
@@ -215,6 +218,48 @@ impl PlanetView {
         let (sw, sh) = (1000.0, 1000.0 * h / w.max(1.0));
         let (x, y) = map_raster::screen_of(self.projection(), sw as u32, sh as u32, p)?;
         Some(egui::pos2(self.rect.min.x + (x / sw * w) as f32, self.rect.min.y + (y / sh * h) as f32))
+    }
+
+    /// An arrow on each plate showing which way it drifts, and its number.
+    fn draw_plate_motion(&self, painter: &egui::Painter, world: &World) {
+        let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220);
+        let shadow = egui::Color32::from_black_alpha(160);
+        for (id, plate) in world.geology.plates.iter().enumerate() {
+            let c = plate.centre.map(|v| v as f64);
+            let spin = plate.spin.map(|v| v as f64);
+            let v = sim_core::cross(spin, c);
+            // A long arrow reads better than a true-to-scale one.
+            let tip = sim_core::normalize([0, 1, 2].map(|k| c[k] + v[k] * 0.18));
+            let (Some(a), Some(b)) = (self.screen(c), self.screen(tip)) else {
+                continue;
+            };
+            if (a.x - b.x).abs() > self.rect.width() * 0.5 {
+                continue;
+            }
+            let font = egui::FontId::proportional(if plate.micro { 10.0 } else { 12.0 });
+            painter.text(
+                a + egui::vec2(1.0, 1.0),
+                egui::Align2::CENTER_BOTTOM,
+                format!("#{id}"),
+                font.clone(),
+                shadow,
+            );
+            painter.text(a, egui::Align2::CENTER_BOTTOM, format!("#{id}"), font, color);
+            let d = b - a;
+            if d.length() < 4.0 {
+                painter.circle_filled(a, 3.0, color);
+                continue;
+            }
+            // A dark outline under a light arrow, so it shows on any colour.
+            for stroke in [egui::Stroke::new(3.5, shadow), egui::Stroke::new(2.0, color)] {
+                painter.line_segment([a, b], stroke);
+                let dir = d.normalized();
+                let side = egui::vec2(-dir.y, dir.x);
+                let head = 7.0;
+                painter.line_segment([b, b - dir * head + side * head * 0.6], stroke);
+                painter.line_segment([b, b - dir * head - side * head * 0.6], stroke);
+            }
+        }
     }
 
     /// Traces the outer edge of a set of hexes.

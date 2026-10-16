@@ -6431,6 +6431,7 @@ version = "0.2.0"
 dependencies = [
  "content",
  "noise",
+ "rand 0.10.3",
  "rayon",
  "serde",
  "sim-core",

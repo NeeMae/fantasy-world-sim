@@ -62,6 +62,10 @@ The World panel generates a new world from:
 | Rivers | How many streams count as rivers: only the great rivers, or every sizeable stream |
 | Lakes | How big lakes grow before evaporation balances their inflow (none to big) |
 | Inland seas | How many basins sink into the continents and flood into enclosed seas |
+| Plates | How many tectonic plates (not counting microplates) |
+| Plate sizes | All much the same size, or a few giants among many small plates |
+| Microplates | Small plates caught between plate groups, with their own smaller ranges |
+| Plate groups | How closely neighbouring plates drift together: grouped plates meet quietly along old seams, and the great ranges rise between groups |
 | Volatility | How turbulent history will be (used from Phase 2) |
 
 Worlds are saved to `fantasy-world-sim/saves` in your user data folder
@@ -72,7 +76,8 @@ world, its history and the settings that made it.
 `sim-cli` takes the same options as flags (`--detail` (grid frequency: the
 planet has 10 × detail² + 2 hexes), `--world-size`, `--continent-size`,
 `--ocean`, `--temperature`, `--rainfall`, `--mountains`, `--erosion`,
-`--rivers`, `--lakes`, `--inland-seas`, `--volatility`), `--view
+`--rivers`, `--lakes`, `--inland-seas`, `--plates`, `--plate-variety`,
+`--microplates`, `--plate-grouping`, `--volatility`), `--view
 terrain|elevation|rainfall|temperature|fertility|currents|plates` and
 `--projection flat|globe` (with `--lat`, `--lon`, `--zoom`) for `--png`,
 `--save FILE` / `--load FILE`, and `--names N` to print sample names for every
@@ -80,9 +85,13 @@ culture.
 
 Mountains come from plate tectonics: colliding plates raise ranges (with
 trenches offshore and chains of volcanic islands at sea), separating plates
-open rifts, and microplates add hill country. Erosion then carves river
-valleys into the ranges and silts up basins. The Plates view shows the plates, with
+open rifts, and plates that drift together in a group meet along worn
+old seams of hill country. Erosion then carves river valleys into the
+ranges and silts up basins. The Plates view shows the plates (one colour
+family per group), each with its number and an arrow for its drift, and
 boundaries tinted red where they collide and blue where they pull apart.
+Select a hex to see its plate in the inspector, where its heading and speed
+can be set by hand: Apply regenerates the same world with the new motion.
 
 Rainfall is simulated after Dwarf Fortress: prevailing winds (trade winds,
 westerlies, polar easterlies) carry moisture from warm seas inland, rain it

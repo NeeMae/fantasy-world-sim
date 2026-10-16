@@ -102,6 +102,7 @@ pub fn panels(
             tools_section(ui, &mut tools, registry, &sim, snap.undo_redo);
             ui.separator();
             inspector_section(ui, &selection, registry, world);
+            plate_section(ui, &selection, world, &mut settings, &mut regenerate);
             ui.separator();
             peoples_section(ui, registry, world, &mut name_draw);
             ui.separator();
@@ -156,6 +157,18 @@ fn world_section(
 ) {
     ui.heading("World");
     ui.small(format!("Current: seed {} · {} hexes", world.seed, world.topology.len()));
+    // Hand-set plate motions name plates by number, which only means the
+    // same plate while the seed and plate layout stay the same.
+    let layout = |s: &WorldSettings| {
+        (
+            s.seed.trim().to_string(),
+            s.world_size.to_bits(),
+            s.plates,
+            s.plate_variety.to_bits(),
+            s.microplates.to_bits(),
+        )
+    };
+    let before = layout(settings);
     egui::Grid::new("worldgen").num_columns(2).show(ui, |ui| {
         ui.label("Seed");
         ui.horizontal(|ui| {
@@ -310,7 +323,69 @@ fn world_section(
             },
         ));
         ui.end_row();
+
+        ui.label("Plates").on_hover_text("How many tectonic plates, not counting microplates");
+        ui.add(egui::Slider::new(&mut settings.plates, 4..=40));
+        ui.end_row();
+
+        ui.label("Plate sizes")
+            .on_hover_text("All much the same size, or a few giants among many small plates");
+        ui.add(egui::Slider::new(&mut settings.plate_variety, 0.0..=1.0).step_by(0.05).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < 0.25 => "Even",
+                    v if v < 0.75 => "Varied",
+                    _ => "Very varied",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
+
+        ui.label("Microplates").on_hover_text(
+            "Small plates caught between plate groups, with their own smaller ranges and rifts",
+        );
+        ui.add(egui::Slider::new(&mut settings.microplates, 0.0..=1.5).step_by(0.05).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < 0.05 => "None",
+                    v if v < 0.4 => "Few",
+                    v if v < 0.9 => "Some",
+                    _ => "Many",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
+
+        ui.label("Plate groups").on_hover_text(
+            "How closely neighbouring plates drift together. Grouped plates meet quietly, along old worn \
+             seams; the great ranges rise between groups",
+        );
+        ui.add(egui::Slider::new(&mut settings.plate_grouping, 0.0..=1.0).step_by(0.05).custom_formatter(
+            |v, _| {
+                match v {
+                    v if v < 0.15 => "Independent",
+                    v if v < 0.5 => "Loose",
+                    v if v < 0.85 => "Close",
+                    _ => "Locked",
+                }
+                .to_string()
+            },
+        ));
+        ui.end_row();
     });
+    if layout(settings) != before {
+        settings.plate_motions.clear();
+    }
+    if !settings.plate_motions.is_empty() {
+        ui.horizontal(|ui| {
+            ui.small(format!("{} plate motion(s) set by hand", settings.plate_motions.len()));
+            if ui.small_button("Clear").clicked() {
+                settings.plate_motions.clear();
+            }
+        });
+    }
 
     let hexes = settings.hexes();
     ui.small(format!("New world: {hexes} hexes"));
@@ -419,6 +494,101 @@ fn inspector_section(ui: &mut egui::Ui, selection: &Selection, registry: &Regist
         ui.monospace(&biome.id);
         ui.end_row();
     });
+}
+
+/// The selected hex's plate: what it is, how it moves, and setting that
+/// motion by hand (which takes a regenerate).
+fn plate_section(
+    ui: &mut egui::Ui,
+    selection: &Selection,
+    world: &sim_core::World,
+    settings: &mut WorldSettings,
+    regenerate: &mut MessageWriter<RegenerateRequest>,
+) {
+    let Some(hex) = selection.0 else {
+        return;
+    };
+    let g = &world.geology;
+    let id = g.plate[hex.index()];
+    let Some(plate) = g.plates.get(id as usize) else {
+        return;
+    };
+    let f64s = |v: [f32; 3]| v.map(|x| x as f64);
+    let (heading, speed) = worldgen::heading_speed(f64s(plate.spin), f64s(plate.centre));
+    let share = g.plate.iter().filter(|&&p| p == id).count() as f64 / g.plate.len().max(1) as f64;
+    let kind = match (plate.micro, plate.continental) {
+        (true, true) => "Continental microplate",
+        (true, false) => "Oceanic microplate",
+        (false, true) => "Continental plate",
+        (false, false) => "Oceanic plate",
+    };
+    let others = g.plates.iter().filter(|p| p.group == plate.group).count() - 1;
+    egui::CollapsingHeader::new(format!("Plate #{id}")).default_open(true).show(ui, |ui| {
+        ui.label(format!("{kind}, {:.1}% of the planet", share * 100.0));
+        ui.label(format!(
+            "Group {} (with {others} other plate{})",
+            plate.group,
+            if others == 1 { "" } else { "s" }
+        ));
+        ui.label(format!("Moving {} at {speed:.2}", compass(heading)));
+
+        // Edit a copy, kept in the settings once changed.
+        let set = settings.plate_motions.iter().position(|m| m.plate == id);
+        let mut motion = set.map(|i| settings.plate_motions[i]).unwrap_or(worldgen::PlateMotion {
+            plate: id,
+            heading: heading.round(),
+            speed: (speed * 100.0).round() / 100.0,
+        });
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Heading");
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut motion.heading, 0.0..=359.0)
+                        .step_by(1.0)
+                        .custom_formatter(|v, _| format!("{v:.0}° {}", compass(v))),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Speed");
+            changed |= ui.add(egui::Slider::new(&mut motion.speed, 0.0..=2.0).step_by(0.01)).changed();
+        });
+        if changed {
+            match set {
+                Some(i) => settings.plate_motions[i] = motion,
+                None => settings.plate_motions.push(motion),
+            }
+        }
+        let set = set.is_some() || changed;
+        let pending = set && ((motion.heading - heading).abs() > 0.5 || (motion.speed - speed).abs() > 0.005);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(pending, egui::Button::new("Apply"))
+                .on_hover_text("Regenerates the world with this motion")
+                .clicked()
+            {
+                regenerate.write(RegenerateRequest);
+            }
+            if ui
+                .add_enabled(set, egui::Button::new("Reset"))
+                .on_hover_text("Back to the motion the plate was generated with (on the next regenerate)")
+                .clicked()
+            {
+                settings.plate_motions.retain(|m| m.plate != id);
+            }
+        });
+        if pending {
+            ui.small("Apply regenerates the world: the same seed, with this plate's new motion.");
+        }
+    });
+}
+
+/// A compass direction for a heading in degrees.
+fn compass(heading: f64) -> &'static str {
+    const NAMES: [&str; 8] =
+        ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+    NAMES[((heading.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]
 }
 
 /// Text in a slot as wide as `widest` would be, so whatever follows it

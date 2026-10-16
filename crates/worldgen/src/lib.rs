@@ -16,14 +16,14 @@
 //! world sea, whatever the seed.
 
 use content::{BiomeId, Registry, Site};
-use std::collections::HashMap;
 
 use content::ReliefId;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin, RidgedMulti};
 use rayon::prelude::*;
 use sim_core::{Geology, Plate, Terrain, Topology, World, rng};
 use sphere::Shape;
-use tectonics::{PlateLayer, smoothstep};
+use tectonics::smoothstep;
+pub use tectonics::{PlateMotion, PlateSettings, heading_speed, spin_for};
 
 mod climate;
 mod currents;
@@ -71,6 +71,8 @@ pub struct WorldGenParams {
     /// Scales how big lakes grow before evaporation balances their inflow:
     /// 0 gives none (closed basins end in dry flats), 2 big lakes.
     pub lakes: f64,
+    /// How the tectonic plates are laid out, and any motions set by hand.
+    pub plates: PlateSettings,
 }
 
 impl Default for WorldGenParams {
@@ -89,6 +91,7 @@ impl Default for WorldGenParams {
             erosion: 1.0,
             rivers: 0.5,
             lakes: 1.0,
+            plates: PlateSettings::default(),
         }
     }
 }
@@ -175,8 +178,7 @@ struct Layers {
     basins: Fbm<Perlin>,
     /// Where ocean-floor mountain building breaks the surface as islands.
     volcanoes: tectonics::Volcanoes,
-    major_plates: PlateLayer,
-    minor_plates: PlateLayer,
+    plates: tectonics::Plates,
     continent_scale: f64,
     mountains: f64,
     inland_seas: f64,
@@ -188,7 +190,7 @@ struct Land {
     ruggedness: f64,
     /// Smooth strength of the mountain range here (before ridging).
     massif: f64,
-    plate: tectonics::Site,
+    plate: u16,
     stress: f64,
 }
 
@@ -202,12 +204,6 @@ impl Layers {
         let cells_per_unit = 1.0 / shape.spacing;
         let detail_octaves =
             ((cells_per_unit / (3.0 * DETAIL_FREQUENCY)).log2().floor() as i64 + 1).clamp(1, 5) as usize;
-        let mut major_plates = PlateLayer::on_planet(seed, 0, 1.0 * continent_scale, shape.radius);
-        let mut minor_plates = PlateLayer::on_planet(seed, 1, 0.38 * continent_scale, shape.radius);
-        // Plates cover the planet, padded for domain warping.
-        let r = shape.radius + 1.5 * continent_scale;
-        major_plates.prepare([-r; 3], [r; 3]);
-        minor_plates.prepare([-r; 3], [r; 3]);
         Layers {
             continents: Fbm::<Perlin>::new(layer_seed(0))
                 .set_octaves(3)
@@ -223,8 +219,7 @@ impl Layers {
             moisture: Fbm::<Perlin>::new(layer_seed(1)).set_octaves(4).set_frequency(2.2),
             climate: Fbm::<Perlin>::new(layer_seed(2)).set_octaves(3).set_frequency(3.0),
             volcanoes: tectonics::Volcanoes::new(seed, 0.09 * continent_scale.sqrt(), true),
-            major_plates,
-            minor_plates,
+            plates: tectonics::Plates::new(seed, shape.radius, &params.plates),
             continent_scale,
             mountains: params.mountains.max(0.0),
             inland_seas: params.inland_seas.clamp(0.0, 1.0),
@@ -247,8 +242,7 @@ impl Layers {
         let crust = |x: [f64; 3]| self.continents.get(x);
         let islands = self.volcanoes.get(q);
         let t = tectonics::evaluate(
-            &self.major_plates,
-            &self.minor_plates,
+            &self.plates,
             pq,
             |x| crust([x[0] - pq[0] + q[0], x[1] - pq[1] + q[1], x[2] - pq[2] + q[2]]),
             islands,
@@ -286,7 +280,7 @@ struct Sample {
     warmth: f32,
     ruggedness: f32,
     massif: f32,
-    plate: tectonics::Site,
+    plate: u16,
     stress: f32,
 }
 
@@ -312,20 +306,26 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     let mut terrain = Terrain::new(topology.len());
     let mut geology = Geology::default();
     let mut variation = Vec::with_capacity(topology.len());
-    // Plates are numbered in order of first appearance, so ids are stable.
-    let mut plate_ids: HashMap<[i32; 3], u16> = HashMap::new();
+    let f32s = |v: [f64; 3]| v.map(|x| x as f32);
+    geology.plates = layers
+        .plates
+        .info
+        .iter()
+        .map(|p| Plate {
+            continental: false,
+            group: p.group,
+            micro: p.micro,
+            spin: f32s(p.spin),
+            centre: f32s(p.centre),
+        })
+        .collect();
     for (i, s) in samples.into_iter().enumerate() {
         terrain.elevation[i] = s.elevation;
         terrain.temperature[i] = s.warmth;
         terrain.ruggedness[i] = s.ruggedness;
         terrain.massif[i] = s.massif;
         variation.push(s.moisture);
-        let next = plate_ids.len() as u16;
-        let id = *plate_ids.entry(s.plate.cell).or_insert_with(|| {
-            geology.plates.push(Plate { continental: false });
-            next
-        });
-        geology.plate.push(id);
+        geology.plate.push(s.plate);
         geology.stress.push(s.stress);
     }
     // Latitude (degrees from the equator) from the climate bands, before

@@ -20,7 +20,7 @@ use crate::{Chronicle, World};
 const MAGIC: &[u8; 8] = b"FWSSAVE\0";
 /// Bumped whenever the saved layout changes incompatibly.
 /// 4: worlds on a sphere (this branch).
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {

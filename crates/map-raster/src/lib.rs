@@ -406,7 +406,7 @@ fn base_color(
             if plate_edge {
                 *shade *= 0.55;
             }
-            plate_color(plate, g.plates[plate as usize].continental, g.stress[i], biome.water)
+            plate_color(plate, &g.plates[plate as usize], g.stress[i], biome.water)
         }
     }
 }
@@ -488,12 +488,19 @@ fn ramp(stops: &[(f32, Rgb)], v: f32) -> Rgb {
     stops.last().map_or(Rgb(0, 0, 0), |s| s.1)
 }
 
-/// A distinct colour per plate: bright for continental crust, muted for
-/// oceanic, tinted red (colliding) or blue (pulling apart) near boundaries.
-fn plate_color(plate: u16, continental: bool, stress: f32, water: bool) -> Rgb {
-    // Golden-angle hue spacing keeps neighbouring ids distinct.
-    let hue = (plate as f32 * 137.508) % 360.0;
-    let (sat, val) = if continental { (0.45, 0.85) } else { (0.35, 0.55) };
+/// A colour per plate: one hue family per group, each plate a shade of it;
+/// bright for continental crust, muted for oceanic, vivid for microplates;
+/// tinted red (colliding) or blue (pulling apart) near boundaries.
+fn plate_color(id: u16, plate: &sim_core::Plate, stress: f32, water: bool) -> Rgb {
+    // Golden-angle hue spacing keeps neighbouring groups distinct; plates
+    // in a group spread a little either side of its hue.
+    let shade = (id as f32 * 0.618_034).fract() - 0.5;
+    let hue = (plate.group as f32 * 137.508 + shade * 40.0).rem_euclid(360.0);
+    let (sat, val) = match (plate.micro, plate.continental) {
+        (true, _) => (0.7, 0.9),
+        (false, true) => (0.45, 0.8 + shade * 0.2),
+        (false, false) => (0.35, 0.55 + shade * 0.15),
+    };
     let mut c = hsv(hue, sat, if water { val * 0.8 } else { val });
     let s = stress.clamp(-1.0, 1.0);
     let tint = if s > 0.0 { Rgb(230, 60, 40) } else { Rgb(60, 120, 240) };

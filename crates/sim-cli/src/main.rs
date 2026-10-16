@@ -59,6 +59,18 @@ struct Args {
     /// Mountain-building multiplier: 0 worn flat, 2 jagged.
     #[arg(long, default_value_t = 1.0)]
     mountains: f64,
+    /// Number of tectonic plates, not counting microplates.
+    #[arg(long, default_value_t = 18)]
+    plates: u32,
+    /// Plate sizes: 0 all much the same, 1 a few giants among many small.
+    #[arg(long, default_value_t = 0.6)]
+    plate_variety: f64,
+    /// Microplates: 0 none, 1 about one per plate.
+    #[arg(long, default_value_t = 0.6)]
+    microplates: f64,
+    /// How closely plates in a group move together: 0 each alone, 1 as one.
+    #[arg(long, default_value_t = 0.4)]
+    plate_grouping: f64,
     /// Ticks (months) to simulate. Added to `--years`.
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -168,6 +180,13 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         rivers: args.rivers,
         lakes: args.lakes,
         rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
+        plates: worldgen::PlateSettings {
+            count: args.plates,
+            variety: args.plate_variety,
+            microplates: args.microplates,
+            grouping: args.plate_grouping,
+            motions: Vec::new(),
+        },
     };
     let started = Instant::now();
     let mut sim = if let Some(path) = &args.load {

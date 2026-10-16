@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### New
+- **Plates rebuilt** (globe-view branch): plates are grown over the planet
+  in varied sizes, drift in groups (plates in a group meet along quiet old
+  seams; the great ranges rise between groups), and microplates are carved
+  out along the boundaries between groups. New World settings: Plates,
+  Plate sizes, Microplates and Plate groups. The Plates view colours plates
+  by group and shows each plate's number and drift; a selected plate's
+  heading and speed can be set by hand. Saves move to format 5.
 - **Esc menu**: Resume, Save, Save as…, Load…, New random world and Quit,
   with the world paused while it's open. Loading, quitting or starting a
   new world asks first if there are unsaved changes; saves can be deleted
@@ -39,6 +46,13 @@ A big round of world generation: living land (rivers, lakes, cultures),
 more natural geography, and worlds you can keep.
 
 ### New
+- **Plates rebuilt** (globe-view branch): plates are grown over the planet
+  in varied sizes, drift in groups (plates in a group meet along quiet old
+  seams; the great ranges rise between groups), and microplates are carved
+  out along the boundaries between groups. New World settings: Plates,
+  Plate sizes, Microplates and Plate groups. The Plates view colours plates
+  by group and shows each plate's number and drift; a selected plate's
+  heading and speed can be set by hand. Saves move to format 5.
 - **Save and load.** Ctrl+S saves the world; the Saves panel names, lists
   and loads saves. A save holds the world, its history and the settings
   that made it, and carrying on after loading gives exactly the same history

@@ -51,6 +51,16 @@ pub struct WorldSettings {
     pub rivers: f64,
     /// Lake size, 0..2.
     pub lakes: f64,
+    /// Number of plates, not counting microplates.
+    pub plates: u32,
+    /// Plate sizes: 0 even, 1 varied.
+    pub plate_variety: f64,
+    /// Microplates, 0..1.
+    pub microplates: f64,
+    /// How closely plates in a group move together, 0..1.
+    pub plate_grouping: f64,
+    /// Plate motions set by hand.
+    pub plate_motions: Vec<worldgen::PlateMotion>,
 }
 
 impl Default for WorldSettings {
@@ -69,6 +79,11 @@ impl Default for WorldSettings {
             erosion: 1.0,
             rivers: 0.5,
             lakes: 1.0,
+            plates: 18,
+            plate_variety: 0.6,
+            microplates: 0.6,
+            plate_grouping: 0.4,
+            plate_motions: Vec::new(),
         }
     }
 }
@@ -100,6 +115,13 @@ impl WorldSettings {
             erosion: self.erosion,
             rivers: self.rivers,
             lakes: self.lakes,
+            plates: worldgen::PlateSettings {
+                count: self.plates,
+                variety: self.plate_variety,
+                microplates: self.microplates,
+                grouping: self.plate_grouping,
+                motions: self.plate_motions.clone(),
+            },
         })
     }
 }
@@ -150,16 +172,22 @@ pub fn regenerate(
     mut selection: ResMut<Selection>,
     mut hover: ResMut<Hover>,
     mut saves: ResMut<crate::saves::SaveState>,
+    sim: Option<Res<SimThread>>,
 ) {
     if requests.read().count() == 0 {
         return;
     }
+    let old_hexes = sim.map(|s| s.snapshot().world.topology.len() as u64);
     match start_world(&mut commands, &content, &settings) {
         Ok(()) => {
             // A new world: don't let Ctrl+S overwrite the last one's save.
             saves.name.clear();
             saves.status = None;
-            selection.0 = None;
+            // On the same grid (say, after changing a plate's motion) the
+            // selected hex is still the same place, so keep it.
+            if old_hexes != Some(settings.hexes()) {
+                selection.0 = None;
+            }
             hover.0 = None;
         }
         Err(e) => error!("could not generate world: {e}"),

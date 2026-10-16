@@ -20,8 +20,14 @@ cells).
 positions on a sphere in noise space whose pole-to-pole distance is the
 *planet size*, so there are no seams and no pinched poles:
 
-- Plates are centred on the planet's surface, so their borders are great
-  circles and they turn about Euler poles.
+- Plates are grown on a coarse sphere grid of their own (sized by the
+  planet, not the map's detail), each from a seed at its own rate through
+  ground of varying roughness, so they come in varied sizes with irregular
+  outlines. Neighbouring plates form groups that turn about a shared Euler
+  pole, more or less closely (Plate groups); microplates are carved out
+  along the boundaries between groups. Boundary landforms follow the signed
+  distance from each plate's edge, kept on that grid and interpolated, so
+  they're smooth at any detail. Plate motions can be set by hand.
 - Wind-driven rainfall and ocean currents, which swept along map rows, now
   sweep along rings of latitude.
 - Blurs are neighbour averaging over a distance in noise space.
