@@ -222,6 +222,7 @@ dependencies = [
  "content",
  "map-raster",
  "names",
+ "rayon",
  "ron",
  "serde",
  "sim-core",

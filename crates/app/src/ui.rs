@@ -20,8 +20,9 @@ pub fn panels(
     mut contexts: EguiContexts,
     mut sim: ResMut<SimThread>,
     view: Res<MapView>,
-    selection: Res<Selection>,
-    hover: Res<Hover>,
+    mut selection: ResMut<Selection>,
+    mut hover: ResMut<Hover>,
+    mut globe: ResMut<crate::globe::GlobeView>,
     mut tools: ResMut<ToolState>,
     mut settings: ResMut<WorldSettings>,
     mut regenerate: MessageWriter<RegenerateRequest>,
@@ -67,6 +68,9 @@ pub fn panels(
                 ui.selectable_value(&mut map_mode.0, mode, label).on_hover_text("M cycles map views");
             }
             ui.separator();
+            ui.toggle_value(&mut globe.enabled, "Globe [G]")
+                .on_hover_text("Show the world on a globe: drag to turn it, scroll to zoom");
+            ui.separator();
             let rate = if current == Speed::Paused {
                 String::new()
             } else {
@@ -96,12 +100,25 @@ pub fn panels(
             peoples_section(ui, &view, world, &mut name_draw);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · Ctrl+S: save");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe · Ctrl+S: save");
         });
     });
 
     let to_rect = |r: egui::Rect| Rect::new(r.min.x, r.min.y, r.max.x, r.max.y);
     over_ui.panels = vec![to_rect(top.response.rect), to_rect(side.response.rect)];
+    if globe.enabled {
+        let central = egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(12, 14, 22)))
+            .show(&mut root, |ui| globe.show(ui, world, &view.registry, map_mode.0));
+        let input = central.inner;
+        hover.0 = input.hover;
+        if let Some(hex) = input.clicked
+            && tools.tool == Tool::Inspect
+        {
+            selection.0 = Some(hex);
+        }
+        over_ui.panels.push(to_rect(central.response.rect));
+    }
     over_ui.busy = ctx.is_pointer_over_egui() || ctx.egui_is_using_pointer() || ctx.any_popup_open();
     Ok(())
 }
@@ -539,9 +556,13 @@ pub fn hotkeys(
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     settings: Res<WorldSettings>,
+    mut globe: ResMut<crate::globe::GlobeView>,
 ) {
     if egui.wants_any_keyboard_input() {
         return;
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        globe.enabled = !globe.enabled;
     }
     if keys.just_pressed(KeyCode::Space) {
         let next = if sim.speed() == Speed::Paused { SPEEDS[2].1 } else { Speed::Paused };

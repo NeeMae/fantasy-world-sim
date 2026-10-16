@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### New
+- **Globe view** (G, or Globe in the top bar): the world on a lit, spinning
+  globe. Drag to turn it, scroll to zoom, click to inspect; every map view
+  works on it. Wrapping worlds cover the whole globe; region maps sit as a
+  patch on a larger, unexplored world.
 - **Rivers** setting: from only the great rivers to every sizeable stream.
   The default now shows about half as many rivers as v0.2.0.
 - **Lakes** setting: from none to big lakes.

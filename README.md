@@ -35,6 +35,7 @@ App controls:
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
 | Ctrl+S | Save the world (see the Saves panel to name and load saves) |
+| G | Globe view: drag to turn the world, scroll to zoom, click to inspect |
 | M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Currents, Plates |
 | Space, 1–5 | Pause/resume, speed |
 

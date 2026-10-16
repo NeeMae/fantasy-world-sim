@@ -7,6 +7,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod camera;
+mod globe;
 mod map_view;
 mod saves;
 mod sim_thread;
@@ -98,6 +99,7 @@ fn main() -> AppExit {
         .add_message::<RegenerateRequest>()
         .add_message::<LoadRequest>()
         .init_resource::<saves::SaveState>()
+        .init_resource::<globe::GlobeView>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
