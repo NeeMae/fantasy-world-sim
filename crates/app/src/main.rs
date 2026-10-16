@@ -6,6 +6,7 @@
 // Bevy systems declare everything they touch as parameters.
 #![allow(clippy::too_many_arguments)]
 
+mod menu;
 mod planet_view;
 mod saves;
 mod sim_thread;
@@ -86,6 +87,7 @@ fn main() -> AppExit {
         .add_message::<RegenerateRequest>()
         .add_message::<LoadRequest>()
         .init_resource::<saves::SaveState>()
+        .init_resource::<menu::Menu>()
         .init_resource::<planet_view::PlanetView>()
         .add_systems(Startup, setup)
         .add_systems(Update, (world_setup::regenerate, world_setup::load, saves::poll, ui::hotkeys).chain())

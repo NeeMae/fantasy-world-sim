@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### New
+- **Esc menu**: Resume, Save, Save as…, Load…, New random world and Quit,
+  with the world paused while it's open. Loading, quitting or starting a
+  new world asks first if there are unsaved changes; saves can be deleted
+  from the Load page. It replaces the sidebar's Saves panel.
 - **(globe-view branch) The world is generated on a sphere**: a geodesic
   grid of hexes round the whole planet, shown as a globe or a flat map. See
   `docs/GLOBE.md`. Saves move to format 4; flat-map saves don't load here.

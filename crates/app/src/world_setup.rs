@@ -196,7 +196,9 @@ pub fn load(
     let name = crate::saves::display_name(path);
     saves.report(format!("Loaded {name}"), true);
     saves.name = name;
-    show_world(&mut commands, Simulation::from_save(data, content.0.clone()));
+    let sim = Simulation::from_save(data, content.0.clone());
+    saves.mark_saved(sim.world());
+    show_world(&mut commands, sim);
     selection.0 = None;
     hover.0 = None;
 }

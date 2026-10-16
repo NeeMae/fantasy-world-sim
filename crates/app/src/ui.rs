@@ -8,8 +8,9 @@ use content::{BiomeId, ReliefId};
 use map_raster::MapMode;
 use sim_core::{Command, Date, Paint};
 
+use crate::menu::{Action, Menu};
 use crate::planet_view::{Outline, PlanetView, describe_position};
-use crate::saves::{self, SaveState};
+use crate::saves::SaveState;
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
 use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, Selection, Tool, ToolState};
 use crate::world_setup::{Content, DETAILS, LARGE_WORLD, LoadRequest, RegenerateRequest, WorldSettings};
@@ -27,6 +28,8 @@ pub fn panels(
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     mut load: MessageWriter<LoadRequest>,
+    mut exit: MessageWriter<AppExit>,
+    mut menu: ResMut<Menu>,
     // Bumped by "More names" so the samples change.
     mut name_draw: Local<u64>,
 ) -> Result {
@@ -42,6 +45,10 @@ pub fn panels(
 
     egui::Panel::top("time").show(&mut root, |ui| {
         ui.horizontal(|ui| {
+            if ui.button("☰ Menu").on_hover_text("Save, load, new world, quit (Esc)").clicked() {
+                menu.escape(&mut sim);
+            }
+            ui.separator();
             // Fixed-width slots, so the controls beside them don't shift as
             // the date grows or the rate changes.
             fixed_label(ui, "Year 9999999, month 12", Date::from_tick(snap.tick).to_string(), true);
@@ -92,8 +99,6 @@ pub fn panels(
         egui::ScrollArea::vertical().show(ui, |ui| {
             world_section(ui, &mut settings, &mut regenerate, world);
             ui.separator();
-            saves::section(ui, &mut save_state, &sim, &settings, &mut load);
-            ui.separator();
             tools_section(ui, &mut tools, registry, &sim, snap.undo_redo);
             ui.separator();
             inspector_section(ui, &selection, registry, world);
@@ -101,7 +106,7 @@ pub fn panels(
             peoples_section(ui, registry, world, &mut name_draw);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: turn · Wheel or +/−: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe/map · Home: recentre · Ctrl+S: save");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe/map · Home: recentre · Ctrl+S: save · Esc: menu");
         });
     });
 
@@ -121,8 +126,25 @@ pub fn panels(
         .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(12, 14, 22)))
         .show(&mut root, |ui| planet.show(ui, world, registry, map_mode.0, &outlines))
         .inner;
-    hover.0 = pointer.hover;
-    tools.apply(&pointer, &sim, world, &mut selection);
+    let world = world.clone();
+    let context = crate::menu::Context { sim: &mut sim, saves: &mut save_state, settings: &mut settings };
+    match crate::menu::show(ctx, &mut menu, context) {
+        Some(Action::Load(path)) => {
+            load.write(LoadRequest(path));
+        }
+        Some(Action::NewWorld) => {
+            regenerate.write(RegenerateRequest);
+        }
+        Some(Action::Quit) => {
+            exit.write(AppExit::Success);
+        }
+        None => {}
+    }
+    // The menu's backdrop covers the planet, so it sees no pointer then.
+    hover.0 = pointer.hover.filter(|_| !menu.open);
+    if !menu.open {
+        tools.apply(&pointer, &sim, &world, &mut selection);
+    }
     Ok(())
 }
 
@@ -490,9 +512,14 @@ pub fn hotkeys(
     mut save_state: ResMut<SaveState>,
     settings: Res<WorldSettings>,
     mut planet: ResMut<PlanetView>,
+    mut menu: ResMut<Menu>,
     time: Res<Time>,
 ) {
-    if egui.wants_any_keyboard_input() {
+    // Esc works even while typing (it backs out of the menu's pages).
+    if keys.just_pressed(KeyCode::Escape) {
+        menu.escape(&mut sim);
+    }
+    if menu.open || egui.wants_any_keyboard_input() {
         return;
     }
     if keys.just_pressed(KeyCode::KeyG) {

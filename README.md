@@ -42,7 +42,8 @@ App controls:
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
-| Ctrl+S | Save the world (see the Saves panel to name and load saves) |
+| Esc | Menu: resume, save, save as, load, new world, quit (pauses the world) |
+| Ctrl+S | Quick-save under the current name |
 | M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Currents, Plates |
 | Space, 1–5 | Pause/resume, speed |
 

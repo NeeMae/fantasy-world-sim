@@ -25,7 +25,8 @@ Controls
   I / B                         inspect tool / paint tool
   [ / ]                         brush size
   Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y undo / redo
-  Ctrl+S                        save the world
+  Esc                           menu (save, load, new world, quit)
+  Ctrl+S                        quick-save
   M                             cycle map views
   Space, 1-5                    pause, speed
 
@@ -33,7 +34,8 @@ The World panel on the right generates new worlds: try Planet size,
 Continents, Detail, Sea level, Temperature, Rainfall, Mountains, Erosion and
 Inland seas, then "Regenerate world".
 
-The Saves panel names, lists and loads saved worlds. Saves are kept in
+The Esc menu saves, loads and deletes saved worlds, and asks before
+throwing away unsaved changes. Saves are kept in
 your user data folder, in fantasy-world-sim/saves:
   Windows:  %APPDATA%\fantasy-world-sim\saves
   macOS:    ~/Library/Application Support/fantasy-world-sim/saves
