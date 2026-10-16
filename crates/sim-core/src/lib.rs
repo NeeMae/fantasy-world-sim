@@ -14,7 +14,7 @@ pub mod world;
 
 pub use chronicle::{Chronicle, Entry, EventKind};
 pub use command::{Command, EditId, Paint};
-pub use hex::{Axial, HexId, Topology, Wrap, round_axial};
+pub use hex::{HexId, MAX_FREQUENCY, Topology, cross, dot, from_lat_lon, lat_lon, normalize, tangent_basis};
 pub use save::{SaveData, SaveError};
 pub use sim::Simulation;
 pub use time::Date;

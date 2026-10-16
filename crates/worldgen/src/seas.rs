@@ -1,22 +1,16 @@
 //! Telling inland seas from the open ocean.
 
-use sim_core::{HexId, Topology, Wrap};
+use sim_core::{HexId, Topology};
 
 /// The most of the world's sea an inland sea can hold; anything bigger is
 /// an ocean in its own right, enclosed or not.
 const MAX_SHARE: f64 = 0.2;
 
-/// Marks sea hexes in bodies of water cut off from the open ocean. The
-/// ocean is the largest body, and any body reaching an edge of the map
-/// that leads on (every edge of an open map, the north and south of a
-/// wrapping one), since it may join the ocean beyond.
-pub fn inland(topo: &Topology, sea: &[bool], open_edges: bool) -> Vec<bool> {
+/// Marks sea hexes in bodies of water cut off from the open ocean (the
+/// largest body).
+pub fn inland(topo: &Topology, sea: &[bool]) -> Vec<bool> {
     let n = topo.len();
-    let (w, h) = (topo.width() as i32, topo.height() as i32);
-    let leads_on = |id: HexId| {
-        let (c, r) = topo.offset(id);
-        open_edges && (r == 0 || r == h - 1 || (topo.wrap() == Wrap::None && (c == 0 || c == w - 1)))
-    };
+    let leads_on = |_: HexId| false;
     let mut body = vec![u32::MAX; n];
     // (size, reaches an open edge) per body.
     let mut bodies: Vec<(usize, bool)> = Vec::new();
@@ -56,34 +50,19 @@ mod tests {
 
     #[test]
     fn enclosed_seas_are_inland_and_the_ocean_is_not() {
-        // Ocean in the west; a walled sea in the east.
-        let topo = Topology::new(40, 20, Wrap::None);
-        let sea: Vec<bool> = topo
-            .ids()
-            .map(|id| {
-                let (c, r) = topo.offset(id);
-                c < 15 || ((25..32).contains(&c) && (6..12).contains(&r))
-            })
-            .collect();
-        let inland = inland(&topo, &sea, true);
-        let at = |c, r| inland[topo.at(c, r).unwrap().index()];
-        assert!(at(28, 8));
-        assert!(!at(5, 5), "the ocean");
-        assert!(!at(20, 5), "land");
-    }
-
-    #[test]
-    fn a_sea_reaching_an_open_edge_may_join_the_ocean_beyond() {
-        let topo = Topology::new(40, 20, Wrap::None);
-        let sea: Vec<bool> = topo
-            .ids()
-            .map(|id| {
-                let (c, r) = topo.offset(id);
-                c < 15 || ((25..32).contains(&c) && r < 6)
-            })
-            .collect();
-        assert!(!inland(&topo, &sea, true)[topo.at(28, 2).unwrap().index()]);
-        // With an ocean ring the edge is just more of the map.
-        assert!(inland(&topo, &sea, false)[topo.at(28, 2).unwrap().index()]);
+        // Ocean over most of the planet, a band of land round the north,
+        // and a small sea inside that land.
+        let topo = Topology::new(20);
+        let lat = |id: HexId| topo.lat_lon(id).0.to_degrees();
+        let lon = |id: HexId| topo.lat_lon(id).1.to_degrees();
+        let small_sea = |id: HexId| (lat(id) - 60.0).abs() < 6.0 && lon(id).abs() < 15.0;
+        let sea: Vec<bool> = topo.ids().map(|id| lat(id) < 40.0 || small_sea(id)).collect();
+        let inland = inland(&topo, &sea);
+        let probe = |lat: f64, lon: f64| {
+            inland[topo.nearest(sim_core::from_lat_lon(lat.to_radians(), lon.to_radians()), None).index()]
+        };
+        assert!(probe(60.0, 0.0), "the enclosed sea");
+        assert!(!probe(0.0, 0.0), "the ocean");
+        assert!(!probe(70.0, 120.0), "land");
     }
 }

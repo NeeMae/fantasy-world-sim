@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### New
+- **(globe-view branch) The world is generated on a sphere**: a geodesic
+  grid of hexes round the whole planet, shown as a globe or a flat map. See
+  `docs/GLOBE.md`. Saves move to format 4; flat-map saves don't load here.
 - **Globe view** (G, or Globe in the top bar): the world on a lit, spinning
   globe. Drag to turn it, scroll to zoom, click to inspect; every map view
   works on it. Wrapping worlds cover the whole globe; region maps sit as a

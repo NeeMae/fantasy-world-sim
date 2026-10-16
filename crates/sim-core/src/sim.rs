@@ -205,12 +205,12 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Terrain, Topology, Wrap};
+    use crate::{Terrain, Topology};
 
     fn sim(seed: u64) -> Simulation {
         let registry = content::load_str(r##"(biomes: [(id: "sea", water: true), (id: "land")])"##).unwrap();
-        let topo = Topology::new(8, 6, Wrap::None);
-        Simulation::new(World::new(seed, topo, Terrain::new(topo.len())), Arc::new(registry))
+        let topo = Topology::new(3);
+        Simulation::new(World::new(seed, topo.clone(), Terrain::new(topo.len())), Arc::new(registry))
     }
 
     fn reshape(center: u32, radius: u32, biome: u16) -> Command {
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn brush_reshapes_an_area() {
         let mut s = sim(1);
-        let center = s.world().topology.at(4, 3).unwrap();
+        let center = HexId(40);
         s.submit(Command::Reshape { center, radius: 1, paint: Paint::Biome(BiomeId(1)), edit: EditId(0) });
         s.apply_pending();
         let land = s.world().terrain.biome.iter().filter(|&&b| b == BiomeId(1)).count();
@@ -277,7 +277,11 @@ mod tests {
         }
         s.apply_pending();
         let after_first = s.world().terrain.biome.clone();
-        s.submit(stroke(30, 0, 1, 8));
+        // Far from the first stroke (cells 10-12 are on the other side).
+        let far = (0..s.world().topology.len() as u32)
+            .max_by_key(|&c| s.world().topology.distance(HexId(c), HexId(11)))
+            .unwrap();
+        s.submit(stroke(far, 0, 1, 8));
         s.apply_pending();
         assert_eq!(s.undo_redo_depth(), (2, 0));
 
@@ -312,8 +316,9 @@ mod tests {
             r#"(biomes: [(id: "sea", water: true), (id: "land")], reliefs: [(id: "flat"), (id: "hills")])"#,
         )
         .unwrap();
-        let topo = Topology::new(8, 6, Wrap::None);
-        let mut s = Simulation::new(World::new(1, topo, Terrain::new(topo.len())), Arc::new(registry));
+        let topo = Topology::new(3);
+        let mut s =
+            Simulation::new(World::new(1, topo.clone(), Terrain::new(topo.len())), Arc::new(registry));
         s.submit(stroke(10, 0, 1, 1));
         s.submit(Command::Reshape {
             center: HexId(10),

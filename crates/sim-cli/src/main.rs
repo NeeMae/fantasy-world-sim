@@ -11,8 +11,8 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use content::Registry;
-use map_raster::{HexLayout, MapMode, RenderOptions};
-use sim_core::{HexId, Simulation, World, Wrap};
+use map_raster::{MapMode, Projection, RenderOptions};
+use sim_core::{HexId, Simulation, World};
 use worldgen::WorldGenParams;
 
 #[derive(Parser)]
@@ -21,20 +21,13 @@ struct Args {
     /// World seed.
     #[arg(long, default_value_t = 1)]
     seed: u64,
-    /// Map width in hexes.
-    #[arg(long, default_value_t = 512)]
-    width: u32,
-    /// Map height in hexes.
-    #[arg(long, default_value_t = 320)]
-    height: u32,
-    /// Map shape.
-    #[arg(long, value_enum, default_value_t = Shape::Flat)]
-    shape: Shape,
-    /// What lies at the map's edges.
-    #[arg(long, value_enum, default_value_t = Edges::Open)]
-    edges: Edges,
-    /// How much of the planet the map shows: 1 is a region, 4+ several continents.
-    #[arg(long, default_value_t = 1.0)]
+    /// Grid frequency: the planet has 10 × detail² + 2 cells (130 is about
+    /// 170 000). The same world comes out at any detail.
+    #[arg(long, default_value_t = 130)]
+    detail: u32,
+    /// Size of the planet (pole to pole in noise space): bigger planets hold
+    /// more, smaller continents.
+    #[arg(long, default_value_t = 4.0)]
     world_size: f64,
     /// How turbulent history is, 0 (calm) to 1 (chaotic).
     #[arg(long, default_value_t = 0.5)]
@@ -66,9 +59,6 @@ struct Args {
     /// Mountain-building multiplier: 0 worn flat, 2 jagged.
     #[arg(long, default_value_t = 1.0)]
     mountains: f64,
-    /// Climate bands across the map (default: regional, or globe for a cylinder).
-    #[arg(long, value_enum)]
-    climate: Option<Climate>,
     /// Ticks (months) to simulate. Added to `--years`.
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -89,9 +79,21 @@ struct Args {
     /// Write a pixel-art image of the final map.
     #[arg(long)]
     png: Option<PathBuf>,
-    /// Hex radius in pixels for `--png`.
-    #[arg(long, default_value_t = 4.0)]
-    hex_size: f32,
+    /// Width of `--png` in pixels.
+    #[arg(long, default_value_t = 1600)]
+    png_width: u32,
+    /// How `--png` lays the planet out: a flat map of the whole planet, or
+    /// the globe seen from above `--lat`/`--lon`.
+    #[arg(long, value_enum, default_value_t = ProjectionArg::Flat)]
+    projection: ProjectionArg,
+    /// Latitude and longitude (degrees) the globe view looks at.
+    #[arg(long, default_value_t = 20.0, allow_hyphen_values = true)]
+    lat: f64,
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    lon: f64,
+    /// Globe zoom: 1 shows the whole disc.
+    #[arg(long, default_value_t = 1.0)]
+    zoom: f64,
     /// Draw hex outlines in `--png`.
     #[arg(long)]
     grid: bool,
@@ -122,27 +124,11 @@ enum View {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Climate {
-    /// Cool north to warm south.
-    Regional,
-    /// Pole to pole with the equator across the middle.
-    Globe,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Edges {
-    /// Land and sea run off the edges, as if the map were part of a larger world.
-    Open,
-    /// The world is ringed by ocean.
-    Ocean,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Shape {
-    /// A bordered rectangle.
+enum ProjectionArg {
+    /// The whole planet, longitude across and latitude down (2:1).
     Flat,
-    /// East and west edges join.
-    Cylinder,
+    /// The globe, as seen from space.
+    Globe,
 }
 
 fn main() -> ExitCode {
@@ -170,16 +156,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let params = WorldGenParams {
         seed: args.seed,
-        width: args.width,
-        height: args.height,
-        wrap: match args.shape {
-            Shape::Flat => Wrap::None,
-            Shape::Cylinder => Wrap::X,
-        },
-        edges: match args.edges {
-            Edges::Open => worldgen::EdgeStyle::Open,
-            Edges::Ocean => worldgen::EdgeStyle::Ocean,
-        },
+        frequency: args.detail,
         world_size: args.world_size,
         continent_scale: args.continent_size,
         ocean: args.ocean,
@@ -191,23 +168,18 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         rivers: args.rivers,
         lakes: args.lakes,
         rules: sim_core::WorldRules { volatility: args.volatility.clamp(0.0, 1.0) },
-        latitudes: match (args.climate, args.shape) {
-            (Some(Climate::Globe), _) | (None, Shape::Cylinder) => worldgen::Latitudes::Globe,
-            (Some(Climate::Regional), _) | (None, Shape::Flat) => worldgen::Latitudes::default(),
-        },
     };
     let started = Instant::now();
     let mut sim = if let Some(path) = &args.load {
         let sim = Simulation::from_save(sim_core::save::load(path, &registry)?, registry.clone());
         let t = &sim.world().topology;
-        println!("loaded {} ({}x{} hexes, {})", path.display(), t.width(), t.height(), sim.world().date());
+        println!("loaded {} ({} cells, {})", path.display(), t.len(), sim.world().date());
         sim
     } else {
         let world = worldgen::generate(&params, &registry)?;
         println!(
-            "worldgen: {}x{} hexes ({}) in {:.0?}",
-            args.width,
-            args.height,
+            "worldgen: detail {} ({} cells) in {:.0?}",
+            args.detail,
             world.topology.len(),
             started.elapsed()
         );
@@ -243,13 +215,19 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             View::Fertility => MapMode::Fertility,
             View::Currents => MapMode::Currents,
         };
-        let opts = RenderOptions {
-            layout: HexLayout { size: args.hex_size },
-            mode,
-            grid: args.grid,
-            ..Default::default()
+        let (projection, width, height, lighting) = match args.projection {
+            ProjectionArg::Flat => (Projection::WHOLE_MAP, args.png_width, args.png_width / 2, false),
+            ProjectionArg::Globe => {
+                let view = map_raster::View {
+                    lon: args.lon.to_radians(),
+                    lat: args.lat.to_radians(),
+                    zoom: args.zoom,
+                };
+                (Projection::Globe(view), args.png_width, args.png_width, true)
+            }
         };
-        let img = map_raster::render(sim.world(), &registry, &opts);
+        let opts = RenderOptions { mode, grid: args.grid, lighting, ..Default::default() };
+        let img = map_raster::render(sim.world(), &registry, &opts, projection, width, height);
         image::save_buffer(&path, &img.rgba, img.width, img.height, image::ExtendedColorType::Rgba8)?;
         println!("wrote {} ({}x{} px)", path.display(), img.width, img.height);
     }
@@ -333,7 +311,8 @@ fn lake_stats(world: &World, registry: &Registry) {
                 thin += 1;
             }
         }
-        sizes.push((size, topo.offset(HexId(start as u32))));
+        let (lat, lon) = topo.lat_lon(HexId(start as u32));
+        sizes.push((size, (lat.to_degrees().round() as i32, lon.to_degrees().round() as i32)));
     }
     if sizes.is_empty() {
         println!("  lakes: none");
@@ -343,7 +322,7 @@ fn lake_stats(world: &World, registry: &Registry) {
     sizes.sort_unstable();
     let (largest, at) = sizes[sizes.len() - 1];
     println!(
-        "  lakes: {} ({} hexes, largest {} at {:?}, median {}), {:.0}% of lake hexes in thin strings",
+        "  lakes: {} ({} hexes, largest {} at lat/lon {:?}, median {}), {:.0}% of lake hexes in thin strings",
         sizes.len(),
         total,
         largest,

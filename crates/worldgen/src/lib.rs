@@ -1,8 +1,14 @@
 //! Procedural world generation.
 //!
-//! Produces elevation, moisture and temperature for every hex, then assigns
-//! each hex the best-matching biome from the loaded content. Generation is a
-//! pure function of `(params, registry)`.
+//! Produces elevation, moisture and temperature for every cell of a sphere
+//! grid (see [`sim_core::Topology`]), then assigns each cell the
+//! best-matching biome from the loaded content. Generation is a pure
+//! function of `(params, registry)`.
+//!
+//! The planet is a sphere in noise space whose pole-to-pole distance is
+//! `world_size`; every layer (continents, plates, climate) is sampled at the
+//! cells' 3D positions on it, so there are no seams and no poles pinched by
+//! a projection.
 //!
 //! Elevation and moisture are *percentiles*: a value of `0.3` means 30% of
 //! the world is lower (or drier). Biome ranges in content therefore read as
@@ -15,7 +21,8 @@ use std::collections::HashMap;
 use content::ReliefId;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin, RidgedMulti};
 use rayon::prelude::*;
-use sim_core::{Geology, Plate, Terrain, Topology, World, Wrap, rng};
+use sim_core::{Geology, Plate, Terrain, Topology, World, rng};
+use sphere::Shape;
 use tectonics::{PlateLayer, smoothstep};
 
 mod climate;
@@ -23,41 +30,24 @@ mod currents;
 mod erosion;
 mod hydrology;
 mod seas;
+mod sphere;
 mod tectonics;
-
-/// What happens at the map's edges.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum EdgeStyle {
-    /// The map is a window onto a larger world: land and sea run off the
-    /// edges wherever the terrain takes them.
-    #[default]
-    Open,
-    /// The world is ringed by ocean, for a self-contained island or
-    /// continent. The falloff is rounded and noisy so coasts don't trace the
-    /// map's rectangle.
-    Ocean,
-}
 
 #[derive(Clone, Debug)]
 pub struct WorldGenParams {
     pub seed: u64,
-    pub width: u32,
-    pub height: u32,
-    pub wrap: Wrap,
-    pub edges: EdgeStyle,
-    /// How much of the planet the map shows. 1 is a region (a sea and the
-    /// lands around it); larger values zoom out to several continents.
-    /// Independent of `width`/`height`, which only set how finely it's
-    /// divided into hexes.
+    /// Grid frequency: the planet has `10 × frequency² + 2` cells. The same
+    /// world comes out at any frequency, just finer or coarser.
+    pub frequency: u32,
+    /// How big the planet is, as the distance from pole to pole in noise
+    /// space: larger planets hold more, smaller continents.
     pub world_size: f64,
     /// Size of landmasses: larger values give fewer, bigger continents.
     pub continent_scale: f64,
-    /// Which climate bands the map covers.
-    pub latitudes: Latitudes,
     /// World-wide rules stored in the world (e.g. volatility).
     pub rules: sim_core::WorldRules,
-    /// Share of the map under sea, 0..1. `None` uses the content's sea level
-    /// (the top of its water biomes' elevation range).
+    /// Share of the planet under sea, 0..1. `None` uses the content's sea
+    /// level (the top of its water biomes' elevation range).
     pub ocean: Option<f64>,
     /// Added to every hex's temperature (0..1 scale): positive for a hotter
     /// world, negative for an ice age.
@@ -83,32 +73,13 @@ pub struct WorldGenParams {
     pub lakes: f64,
 }
 
-/// How the map maps onto the planet's climate bands.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Latitudes {
-    /// Warmth changes steadily from `north` to `south` (0 = polar, 1 = equatorial).
-    Span { north: f64, south: f64 },
-    /// Pole to pole, with the equator across the middle.
-    Globe,
-}
-
-impl Default for Latitudes {
-    fn default() -> Self {
-        Latitudes::Span { north: 0.12, south: 0.88 }
-    }
-}
-
 impl Default for WorldGenParams {
     fn default() -> Self {
         WorldGenParams {
             seed: 0,
-            width: 512,
-            height: 320,
-            wrap: Wrap::None,
-            edges: EdgeStyle::Open,
-            world_size: 1.0,
+            frequency: 130,
+            world_size: 4.0,
             continent_scale: 1.0,
-            latitudes: Latitudes::default(),
             rules: sim_core::WorldRules::default(),
             ocean: None,
             temperature: 0.0,
@@ -126,10 +97,8 @@ impl Default for WorldGenParams {
 pub enum WorldGenError {
     #[error("the loaded content defines no biomes")]
     NoBiomes,
-    #[error("a wrapping world needs an even width (got {0})")]
-    OddWrapWidth(u32),
-    #[error("world dimensions must be non-zero")]
-    Empty,
+    #[error("grid frequency must be 1..={max} (got {0})", max = sim_core::MAX_FREQUENCY)]
+    BadFrequency(u32),
     #[error("world size must be positive (got {0})")]
     BadWorldSize(f64),
 }
@@ -142,10 +111,16 @@ pub fn river_threshold(rivers: f64) -> f32 {
     (sim_core::RIVER_DISCHARGE as f64 * 8f64.powf(1.0 - v) * 0.5f64.powf(v)) as f32
 }
 
-/// Rows in the fixed-resolution copy of the world that erosion works on.
-const EROSION_ROWS: u32 = 160;
+/// The planet's radius in noise space for a world size (pole to pole).
+pub fn planet_radius(world_size: f64) -> f64 {
+    world_size / std::f64::consts::PI
+}
+
+/// Frequency of the coarse copy of the world that erosion works on (about
+/// 37 000 cells), so every grid gets the same valleys.
+const EROSION_FREQUENCY: u32 = 61;
 /// Raw depth of cutting at which a valley floor stops being rugged.
-const VALLEY_DEPTH: f64 = 0.08;
+const VALLEY_DEPTH: f64 = 0.3;
 
 /// Erodes a coarse copy of the world; returns its topology, how much each
 /// of its hexes rose (negative where cut down) and its eroded heights.
@@ -157,62 +132,25 @@ fn erosion_delta(
     if params.erosion <= 0.0 {
         return None;
     }
-    let rows = EROSION_ROWS;
-    let mut cols = ((params.width as f64 * rows as f64 / params.height as f64).round() as u32).max(2);
-    if params.wrap == Wrap::X {
-        cols += cols & 1;
-    }
-    let coarse = Topology::new(cols, rows, params.wrap);
-    let coarse_params = WorldGenParams { width: cols, height: rows, ..params.clone() };
+    let coarse = Topology::new(EROSION_FREQUENCY.min(params.frequency));
+    let shape = Shape::new(&coarse, planet_radius(params.world_size));
     let before: Vec<f32> = (0..coarse.len() as u32)
         .into_par_iter()
-        .map(|i| sample(&coarse, layers, &coarse_params, sim_core::HexId(i)).elevation)
+        .map(|i| sample(&coarse, layers, &shape, sim_core::HexId(i)).elevation)
         .collect();
     let coast = {
         let mut sorted = before.clone();
         sorted.sort_unstable_by(f32::total_cmp);
         sorted[((sorted.len() - 1) as f64 * sea_share) as usize]
     };
-    let row_step = params.world_size / rows as f64;
-    let column_step = 0.75 / (3f64.sqrt() / 2.0) * row_step;
     let mut after = before.clone();
-    erosion::erode(&coarse, &mut after, coast, column_step * row_step, row_step, params.erosion);
+    erosion::erode(&coarse, &mut after, coast, shape.cell_area, shape.spacing, params.erosion);
     let delta = after.iter().zip(&before).map(|(a, b)| a - b).collect();
     Some((coarse, delta, after))
 }
 
-/// Interpolates a per-hex field from one grid onto another covering the
-/// same area.
-fn upsample(from: &Topology, values: &[f32], to: &Topology) -> Vec<f32> {
-    let (fw, fh) = (from.width() as i32, from.height() as i32);
-    let scale = from.height() as f64 / to.height() as f64;
-    let wraps = from.wrap() == Wrap::X;
-    let at = |c: i32, r: i32| {
-        let c = if wraps { c.rem_euclid(fw) } else { c.clamp(0, fw - 1) };
-        values[from.at(c, r.clamp(0, fh - 1)).expect("clamped").index()]
-    };
-    // A column's value at fractional row `y` (odd columns sit half a row lower).
-    let column = |c: i32, y: f64| {
-        let y = y - if c.rem_euclid(2) == 1 { 0.5 } else { 0.0 };
-        let r = y.floor();
-        let t = (y - r) as f32;
-        at(c, r as i32) * (1.0 - t) + at(c, r as i32 + 1) * t
-    };
-    (0..to.len() as u32)
-        .into_par_iter()
-        .map(|i| {
-            let (col, row) = to.offset(sim_core::HexId(i));
-            let x = col as f64 * scale;
-            let y = (row as f64 + if col & 1 == 1 { 0.5 } else { 0.0 }) * scale;
-            let c = x.floor();
-            let t = (x - c) as f32;
-            column(c as i32, y) * (1.0 - t) + column(c as i32 + 1, y) * t
-        })
-        .collect()
-}
-
 /// How far inland (noise-space units) a coast feels the current offshore.
-const COAST_REACH: f64 = 0.06;
+const COAST_REACH: f64 = 0.09;
 
 /// Independent noise layers, each seeded from the world seed.
 struct Layers {
@@ -255,21 +193,21 @@ struct Land {
 }
 
 impl Layers {
-    fn new(params: &WorldGenParams) -> Self {
+    fn new(params: &WorldGenParams, shape: &Shape) -> Self {
         let (seed, continent_scale) = (params.seed, params.continent_scale);
         let layer_seed = |layer| rng::mix(seed, 0, layer, rng::purpose::WORLDGEN) as u32;
         // Skip detail octaves finer than about three hexes: they can't be
         // drawn and only add speckle. Each octave doubles the frequency.
         const DETAIL_FREQUENCY: f64 = 3.2;
-        let cycles = DETAIL_FREQUENCY * params.world_size; // base cycles per map height
+        let cells_per_unit = 1.0 / shape.spacing;
         let detail_octaves =
-            ((params.height as f64 / (3.0 * cycles)).log2().floor() as i64 + 1).clamp(1, 5) as usize;
-        let three_d = params.wrap == Wrap::X;
-        let mut major_plates = PlateLayer::new(seed, 0, 1.0 * continent_scale, three_d);
-        let mut minor_plates = PlateLayer::new(seed, 1, 0.38 * continent_scale, three_d);
-        let (min, max) = noise_bounds(params);
-        major_plates.prepare(min, max);
-        minor_plates.prepare(min, max);
+            ((cells_per_unit / (3.0 * DETAIL_FREQUENCY)).log2().floor() as i64 + 1).clamp(1, 5) as usize;
+        let mut major_plates = PlateLayer::on_planet(seed, 0, 1.0 * continent_scale, shape.radius);
+        let mut minor_plates = PlateLayer::on_planet(seed, 1, 0.38 * continent_scale, shape.radius);
+        // Plates cover the planet, padded for domain warping.
+        let r = shape.radius + 1.5 * continent_scale;
+        major_plates.prepare([-r; 3], [r; 3]);
+        minor_plates.prepare([-r; 3], [r; 3]);
         Layers {
             continents: Fbm::<Perlin>::new(layer_seed(0))
                 .set_octaves(3)
@@ -284,7 +222,7 @@ impl Layers {
             plate_warp: Fbm::<Perlin>::new(layer_seed(6)).set_octaves(2).set_frequency(0.8 / continent_scale),
             moisture: Fbm::<Perlin>::new(layer_seed(1)).set_octaves(4).set_frequency(2.2),
             climate: Fbm::<Perlin>::new(layer_seed(2)).set_octaves(3).set_frequency(3.0),
-            volcanoes: tectonics::Volcanoes::new(seed, 0.09 * continent_scale.sqrt(), three_d),
+            volcanoes: tectonics::Volcanoes::new(seed, 0.09 * continent_scale.sqrt(), true),
             major_plates,
             minor_plates,
             continent_scale,
@@ -340,23 +278,6 @@ impl Layers {
     }
 }
 
-/// The noise-space box the map samples, padded for domain warping.
-fn noise_bounds(params: &WorldGenParams) -> ([f64; 3], [f64; 3]) {
-    let span = params.width as f64 * 0.75 / (3f64.sqrt() / 2.0) / params.height as f64;
-    let ws = params.world_size;
-    let pad = 1.5 * params.continent_scale;
-    match params.wrap {
-        Wrap::X => {
-            let r = span * ws / std::f64::consts::TAU + pad;
-            ([-r, -r, -ws / 2.0 - pad], [r, r, ws / 2.0 + pad])
-        }
-        Wrap::None => {
-            let (hx, hy) = (span * ws / 2.0 + pad, ws / 2.0 + pad);
-            ([-hx, -hy, 0.0], [hx, hy, 0.0])
-        }
-    }
-}
-
 /// Raw values for one hex, before normalisation.
 struct Sample {
     elevation: f32,
@@ -373,21 +294,19 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     if registry.biomes().is_empty() {
         return Err(WorldGenError::NoBiomes);
     }
-    if params.width == 0 || params.height == 0 {
-        return Err(WorldGenError::Empty);
+    if !(1..=sim_core::MAX_FREQUENCY).contains(&params.frequency) {
+        return Err(WorldGenError::BadFrequency(params.frequency));
     }
     if !(params.world_size > 0.0 && params.world_size.is_finite()) {
         return Err(WorldGenError::BadWorldSize(params.world_size));
     }
-    if params.wrap == Wrap::X && !params.width.is_multiple_of(2) {
-        return Err(WorldGenError::OddWrapWidth(params.width));
-    }
-    let topology = Topology::new(params.width, params.height, params.wrap);
-    let layers = Layers::new(params);
+    let topology = Topology::new(params.frequency);
+    let shape = Shape::new(&topology, planet_radius(params.world_size));
+    let layers = Layers::new(params, &shape);
 
     let samples: Vec<Sample> = (0..topology.len() as u32)
         .into_par_iter()
-        .map(|i| sample(&topology, &layers, params, sim_core::HexId(i)))
+        .map(|i| sample(&topology, &layers, &shape, sim_core::HexId(i)))
         .collect();
 
     let mut terrain = Terrain::new(topology.len());
@@ -409,13 +328,10 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         geology.plate.push(id);
         geology.stress.push(s.stress);
     }
-    // Latitude from the climate bands, before altitude cooling.
+    // Latitude (degrees from the equator) from the climate bands, before
+    // altitude cooling, so the bands' wobble carries into the winds.
     let latitude: Vec<f32> = terrain.temperature.iter().map(|w| 90.0 * (1.0 - w.clamp(0.0, 1.0))).collect();
-
     let sea_level = registry.sea_level();
-    let column_step = 0.75 / (3f64.sqrt() / 2.0) / params.height as f64 * params.world_size;
-    let row_step = params.world_size / params.height as f64;
-
     // Wear the land down. Erosion runs on a copy of the world at a fixed
     // resolution, so it carves the same valleys at every scale, and the
     // change is blended onto the map. Where it cut deep, a range is broken
@@ -423,8 +339,8 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
     let share = params.ocean.unwrap_or(sea_level as f64).clamp(0.0, 1.0);
     let carved = erosion_delta(params, &layers, share);
     if let Some((coarse, delta, after)) = &carved {
-        let delta = upsample(coarse, delta, &topology);
-        let after = upsample(coarse, after, &topology);
+        let delta = sphere::resample(coarse, delta, &topology);
+        let after = sphere::resample(coarse, after, &topology);
         let original = terrain.elevation.clone();
         for i in 0..terrain.len() {
             let e = terrain.elevation[i];
@@ -433,7 +349,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
             // cliff) isn't dug out by cutting meant for the slope above.
             let new = if delta[i] < 0.0 { e.min((e + delta[i]).max(after[i])) } else { e + delta[i] };
             terrain.elevation[i] = new;
-            terrain.ruggedness[i] *= 1.0 - smoothstep(0.0, VALLEY_DEPTH, (e - new) as f64) as f32 * 0.85;
+            terrain.ruggedness[i] *= 1.0 - smoothstep(0.0, VALLEY_DEPTH, (e - new) as f64) as f32 * 0.6;
         }
         // Blending a coarse valley onto the map leaves it a chain of dips
         // (deepest at coarse hex centres, with saddles between), which rivers
@@ -469,7 +385,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         }
     }
     let sea: Vec<bool> = terrain.elevation.iter().map(|&e| e < sea_level).collect();
-    let inland = seas::inland(&topology, &sea, params.edges == EdgeStyle::Open);
+    let inland = seas::inland(&topology, &sea);
     for (i, &is_sea) in sea.iter().enumerate() {
         if is_sea {
             // Relief and ranges belong to land; seas are flat.
@@ -490,14 +406,10 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 
     // Ocean currents warm or chill the sea, and with it the coasts nearby
     // (and so how much rain the air off that sea carries inland).
-    let current = currents::anomaly(&topology, &sea, &latitude, column_step, row_step);
+    let rings = sphere::rings(&topology, &shape);
+    let current = currents::anomaly(&topology, &shape, &rings, &sea, &latitude);
     terrain.current = current.clone();
-    let reach = |step: f64| ((COAST_REACH / step).round() as i32).max(1);
-    let mut coastal = current.clone();
-    for _ in 0..2 {
-        coastal = climate::blur(&topology, &coastal, reach(column_step), 0);
-        coastal = climate::blur(&topology, &coastal, 0, reach(row_step));
-    }
+    let coastal = sphere::smooth(&topology, &shape, &current, COAST_REACH);
     for i in 0..terrain.len() {
         let shift = if sea[i] { 0.15 * current[i] } else { 0.3 * coastal[i] };
         terrain.temperature[i] = (terrain.temperature[i] + shift).clamp(0.0, 1.0);
@@ -515,12 +427,12 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         .collect();
     let rain = climate::rainfall(&climate::ClimateInput {
         topology: &topology,
+        shape: &shape,
+        rings: &rings,
         sea: &sea,
         height: &height,
         latitude: &latitude,
         temperature: &terrain.temperature,
-        column_step,
-        row_step,
     });
 
     let rain: Vec<f32> = rain.iter().map(|r| r * params.rainfall.max(0.0) as f32).collect();
@@ -531,7 +443,7 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
         &terrain.elevation,
         &sea,
         &rain,
-        column_step * row_step,
+        shape.cell_area,
         hydrology::Routing::default(),
         params.lakes.max(0.0),
     );
@@ -604,61 +516,20 @@ pub fn generate(params: &WorldGenParams, registry: &Registry) -> Result<World, W
 }
 
 /// Raw values for one hex.
-fn sample(topology: &Topology, layers: &Layers, params: &WorldGenParams, hex: sim_core::HexId) -> Sample {
-    let (col, row) = topology.offset(hex);
-    let (w, h) = (topology.width() as f64, topology.height() as f64);
-    // Hex centre in "rows" units: columns are 3/4 of a hex width apart and
-    // flat-topped hexes are √3/2 as tall as they are wide.
-    let x = col as f64 * 0.75 / (3f64.sqrt() / 2.0);
-    let y = row as f64 + if col & 1 == 1 { 0.5 } else { 0.0 };
-    let (u, v) = (x / h, y / h); // v in 0..1, u scaled to keep hexes isotropic
-    let span = w * 0.75 / (3f64.sqrt() / 2.0) / h;
-
-    // Noise-space position, centred on the middle of the map so that a
-    // wider canvas or a bigger world reveals more around the same centre.
-    // `world_size` is how many "region heights" of terrain the map spans.
-    let ws = params.world_size;
-    let point = |offset: f64| -> [f64; 3] {
-        match topology.wrap() {
-            // Sample a cylinder so the noise is seamless across the east-west seam.
-            Wrap::X => {
-                let angle = u / span * std::f64::consts::TAU;
-                let radius = span * ws / std::f64::consts::TAU;
-                [angle.cos() * radius + offset, angle.sin() * radius, (v - 0.5) * ws]
-            }
-            Wrap::None => [(u - span / 2.0) * ws + offset, (v - 0.5) * ws, 0.0],
-        }
-    };
-
+fn sample(topology: &Topology, layers: &Layers, shape: &Shape, hex: sim_core::HexId) -> Sample {
+    let p = topology.position(hex);
+    let r = shape.radius;
+    // Noise-space position on the planet; other layers sample the same
+    // sphere shifted well away, so they're independent.
+    let point = |offset: f64| -> [f64; 3] { [p[0] * r + offset, p[1] * r, p[2] * r] };
     let land = layers.land(point(0.0));
-    let mut elevation = land.elevation;
-    if params.edges == EdgeStyle::Ocean {
-        // A gentle slope down from the middle across the whole map makes
-        // land more likely towards the centre without dictating where the
-        // coast goes, so the terrain still draws it (islands, bays, inland
-        // seas). A ring-shaped falloff instead makes every world the same
-        // rounded box. A thin band at the very border guarantees open sea all
-        // round. A wrapping map only has north and south edges.
-        let ny = 2.0 * v - 1.0;
-        let (r, border) = match topology.wrap() {
-            Wrap::None => {
-                let nx = 2.0 * u / span - 1.0;
-                ((nx * nx + ny * ny).sqrt() / std::f64::consts::SQRT_2, nx.abs().max(ny.abs()))
-            }
-            Wrap::X => (ny.abs(), ny.abs()),
-        };
-        elevation -= r * r * 1.4 + smoothstep(0.9, 0.98, border) * 2.0;
-    }
-
     let moisture = layers.moisture.get(point(100.0));
-    let latitude_warmth = match params.latitudes {
-        Latitudes::Span { north, south } => north + (south - north) * v,
-        Latitudes::Globe => 1.0 - (v - 0.5).abs() * 2.0,
-    } + layers.climate.get(point(200.0)) * 0.12;
+    let latitude = p[2].clamp(-1.0, 1.0).asin().abs() / std::f64::consts::FRAC_PI_2;
+    let warmth = 1.0 - latitude + layers.climate.get(point(200.0)) * 0.12;
     Sample {
-        elevation: elevation as f32,
+        elevation: land.elevation as f32,
         moisture: moisture as f32,
-        warmth: latitude_warmth as f32,
+        warmth: warmth as f32,
         ruggedness: land.ruggedness as f32,
         massif: land.massif as f32,
         plate: land.plate,
@@ -716,6 +587,7 @@ fn choose_biome(registry: &Registry, site: Site) -> BiomeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim_core::HexId;
 
     fn registry() -> Registry {
         content::load_str(
@@ -728,95 +600,62 @@ mod tests {
         .unwrap()
     }
 
-    fn params(seed: u64, wrap: Wrap) -> WorldGenParams {
-        WorldGenParams { seed, width: 64, height: 40, wrap, ..Default::default() }
+    fn params(seed: u64) -> WorldGenParams {
+        WorldGenParams { seed, frequency: 24, ..Default::default() }
     }
 
     #[test]
     fn deterministic_per_seed() {
         let reg = registry();
-        let a = generate(&params(7, Wrap::None), &reg).unwrap();
-        let b = generate(&params(7, Wrap::None), &reg).unwrap();
-        let c = generate(&params(8, Wrap::None), &reg).unwrap();
+        let a = generate(&params(7), &reg).unwrap();
+        let b = generate(&params(7), &reg).unwrap();
+        let c = generate(&params(8), &reg).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_ne!(a.state_hash(), c.state_hash());
     }
 
     #[test]
-    fn ocean_edges_ring_the_map_with_sea() {
+    fn same_world_at_any_detail() {
+        // A finer grid should draw the same geography more finely.
         let reg = registry();
-        let w = generate(&WorldGenParams { edges: EdgeStyle::Ocean, ..params(3, Wrap::None) }, &reg).unwrap();
-        let sea = reg.biome_id("sea").unwrap();
-        let land = w.terrain.biome.iter().filter(|&&b| b != sea).count();
-        assert!(land > 0 && land < w.terrain.len());
-        for col in 0..64 {
-            let hex = w.topology.at(col, 0).unwrap();
-            assert!(reg.biome(w.terrain.biome[hex.index()]).water, "top edge is sea");
-        }
-    }
-
-    #[test]
-    fn open_edges_let_land_reach_the_border() {
-        let reg = registry();
-        let sea = reg.biome_id("sea").unwrap();
-        // Across a handful of seeds, land should touch the border somewhere.
-        let touches = (0..8).any(|seed| {
-            let w = generate(&params(seed, Wrap::None), &reg).unwrap();
-            let t = &w.topology;
-            let border = (0..64)
-                .flat_map(|c| [t.at(c, 0), t.at(c, 39)])
-                .chain((0..40).flat_map(|r| [t.at(0, r), t.at(63, r)]));
-            border.flatten().any(|h| w.terrain.biome[h.index()] != sea)
-        });
-        assert!(touches);
-    }
-
-    #[test]
-    fn same_world_at_any_scale() {
-        // Doubling the hex count should redraw the same geography finer.
-        let reg = registry();
-        let coarse =
-            generate(&WorldGenParams { width: 64, height: 40, ..params(9, Wrap::None) }, &reg).unwrap();
-        let fine =
-            generate(&WorldGenParams { width: 128, height: 80, ..params(9, Wrap::None) }, &reg).unwrap();
+        let coarse = generate(&WorldGenParams { frequency: 24, ..params(9) }, &reg).unwrap();
+        let fine = generate(&WorldGenParams { frequency: 48, ..params(9) }, &reg).unwrap();
         let sea = reg.biome_id("sea").unwrap();
         let mut agree = 0;
         for id in coarse.topology.ids() {
-            let (c, r) = coarse.topology.offset(id);
-            let f = fine.topology.at(c * 2, r * 2).unwrap();
+            let f = fine.topology.nearest(coarse.topology.position(id), None);
             agree += ((coarse.terrain.biome[id.index()] == sea) == (fine.terrain.biome[f.index()] == sea))
                 as usize;
         }
         let share = agree as f64 / coarse.topology.len() as f64;
-        assert!(share > 0.9, "land and sea mostly agree across scales ({share:.2})");
+        assert!(share > 0.85, "land and sea mostly agree across detail levels ({share:.2})");
     }
 
     #[test]
-    fn wrapping_world_is_seamless() {
-        // Elevation should change no more across the east-west seam than
-        // between any other pair of neighbouring columns.
+    fn poles_are_colder_than_the_equator() {
         let reg = registry();
-        let w = generate(&WorldGenParams { world_size: 3.0, ..params(5, Wrap::X) }, &reg).unwrap();
-        let t = &w.topology;
-        let col_step = |a: i32, b: i32| -> f32 {
-            (0..t.height() as i32)
-                .map(|r| {
-                    (w.terrain.elevation[t.at(a, r).unwrap().index()]
-                        - w.terrain.elevation[t.at(b, r).unwrap().index()])
-                    .abs()
-                })
-                .sum::<f32>()
+        let w = generate(&params(4), &reg).unwrap();
+        let mean = |pick: &dyn Fn(f64) -> bool| {
+            let cells: Vec<usize> = w
+                .topology
+                .ids()
+                .filter(|&id| pick(w.topology.lat_lon(id).0.to_degrees()))
+                .map(HexId::index)
+                .collect();
+            cells.iter().map(|&i| w.terrain.temperature[i]).sum::<f32>() / cells.len() as f32
         };
-        let seam = col_step(63, 0);
-        let typical = (1..63).map(|c| col_step(c - 1, c)).sum::<f32>() / 62.0;
-        assert!(seam < typical * 2.5, "seam step {seam} vs typical {typical}");
+        let polar = mean(&|lat| lat.abs() > 70.0);
+        let tropical = mean(&|lat| lat.abs() < 20.0);
+        assert!(tropical > polar + 0.4, "tropics {tropical} vs poles {polar}");
     }
 
     #[test]
-    fn rejects_bad_world_size() {
+    fn rejects_bad_params() {
         let reg = registry();
-        let bad = WorldGenParams { world_size: 0.0, ..params(1, Wrap::None) };
+        let bad = WorldGenParams { world_size: 0.0, ..params(1) };
         assert!(matches!(generate(&bad, &reg), Err(WorldGenError::BadWorldSize(_))));
+        let bad = WorldGenParams { frequency: 0, ..params(1) };
+        assert!(matches!(generate(&bad, &reg), Err(WorldGenError::BadFrequency(0))));
     }
 
     #[test]
@@ -867,17 +706,9 @@ mod tests {
     #[test]
     fn biome_ranges_are_proportions() {
         let reg = registry();
-        let w = generate(&params(11, Wrap::None), &reg).unwrap();
+        let w = generate(&params(11), &reg).unwrap();
         let water = w.terrain.biome.iter().filter(|&&b| reg.biome(b).water).count();
         let share = water as f32 / w.terrain.len() as f32;
-        assert!((share - 0.5).abs() < 0.01, "sea covers half the map, got {share}");
-    }
-
-    #[test]
-    fn rejects_bad_params() {
-        let reg = registry();
-        let odd = WorldGenParams { width: 63, ..params(1, Wrap::X) };
-        assert!(matches!(generate(&odd, &reg), Err(WorldGenError::OddWrapWidth(63))));
-        assert!(generate(&params(1, Wrap::X), &reg).is_ok());
+        assert!((share - 0.5).abs() < 0.02, "sea covers half the planet, got {share}");
     }
 }

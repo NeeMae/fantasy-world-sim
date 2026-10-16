@@ -6,9 +6,7 @@
 // Bevy systems declare everything they touch as parameters.
 #![allow(clippy::too_many_arguments)]
 
-mod camera;
-mod globe;
-mod map_view;
+mod planet_view;
 mod saves;
 mod sim_thread;
 mod tools;
@@ -23,8 +21,8 @@ use bevy::window::WindowResolution;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 
-use tools::{Hover, MapModeSetting, PointerOverUi, Selection, ToolState};
-use world_setup::{Climate, Content, LoadRequest, RegenerateRequest, SCALES, WorldSettings};
+use tools::{Hover, MapModeSetting, Selection, ToolState};
+use world_setup::{Content, DETAILS, LoadRequest, RegenerateRequest, WorldSettings};
 
 #[derive(Parser)]
 #[command(version, about = "Fantasy world simulator")]
@@ -32,18 +30,12 @@ struct Args {
     /// World seed (random if omitted).
     #[arg(long)]
     seed: Option<u64>,
-    /// Detail preset: coarse, normal, fine or "very fine".
+    /// Detail preset: coarse, normal, fine, "very fine" or extreme.
     #[arg(long, default_value = "normal")]
-    scale: String,
-    /// How much of the planet the map shows: 1 is a region, 4+ several continents.
-    #[arg(long, default_value_t = 1.0)]
+    detail: String,
+    /// Size of the planet: bigger planets hold more, smaller continents.
+    #[arg(long, default_value_t = 4.0)]
     world_size: f64,
-    /// Wrap east-west (a globe). Also switches the climate to pole-to-pole.
-    #[arg(long)]
-    wrap: bool,
-    /// Ring the world with ocean instead of letting land run off the edges.
-    #[arg(long)]
-    ocean_edges: bool,
     /// Content packs, loaded in order. Later packs override earlier ones.
     /// (Default: the base pack, found in ./packs/base or next to the program.)
     #[arg(long = "pack")]
@@ -62,18 +54,14 @@ fn main() -> AppExit {
             return AppExit::error();
         }
     };
-    let Some(scale) = SCALES.iter().position(|(name, _)| name.eq_ignore_ascii_case(&args.scale)) else {
-        eprintln!("error: unknown scale {:?}; expected coarse, normal, fine or \"very fine\"", args.scale);
+    let Some(detail) = DETAILS.iter().position(|(name, _)| name.eq_ignore_ascii_case(&args.detail)) else {
+        eprintln!(
+            "error: unknown detail {:?}; expected coarse, normal, fine, \"very fine\" or extreme",
+            args.detail
+        );
         return AppExit::error();
     };
-    let mut settings = WorldSettings {
-        scale,
-        world_size: args.world_size,
-        wrap: args.wrap,
-        climate: if args.wrap { Climate::Globe } else { Climate::Regional },
-        edges: if args.ocean_edges { worldgen::EdgeStyle::Ocean } else { worldgen::EdgeStyle::Open },
-        ..Default::default()
-    };
+    let mut settings = WorldSettings { detail, world_size: args.world_size, ..Default::default() };
     if let Some(seed) = args.seed {
         settings.seed = seed.to_string();
     }
@@ -94,48 +82,27 @@ fn main() -> AppExit {
         .init_resource::<Selection>()
         .init_resource::<Hover>()
         .init_resource::<ToolState>()
-        .init_resource::<PointerOverUi>()
         .init_resource::<MapModeSetting>()
         .add_message::<RegenerateRequest>()
         .add_message::<LoadRequest>()
         .init_resource::<saves::SaveState>()
-        .init_resource::<globe::GlobeView>()
+        .init_resource::<planet_view::PlanetView>()
         .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (
-                world_setup::regenerate,
-                world_setup::load,
-                saves::poll,
-                (camera::controls, ui::hotkeys),
-                tools::update_hover,
-                tools::use_tool,
-                map_view::apply_map_mode,
-                map_view::redraw_changes,
-                map_view::update_outlines,
-            )
-                .chain(),
-        )
+        .add_systems(Update, (world_setup::regenerate, world_setup::load, saves::poll, ui::hotkeys).chain())
         .add_systems(EguiPrimaryContextPass, ui::panels)
         .run()
 }
 
 fn setup(
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
     content: Res<Content>,
     settings: Res<WorldSettings>,
-    windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    match world_setup::start_world(&mut commands, &mut images, &content, &settings, default()) {
-        Ok(map_size) => {
-            let window = windows.single().map_or(Vec2::new(1600.0, 900.0), Window::size);
-            camera::spawn(&mut commands, map_size, window);
-        }
-        Err(e) => {
-            error!("world generation failed: {e}");
-            exit.write(AppExit::error());
-        }
+    // egui draws through a camera; the planet itself is an egui image.
+    commands.spawn(Camera2d);
+    if let Err(e) = world_setup::start_world(&mut commands, &content, &settings) {
+        error!("world generation failed: {e}");
+        exit.write(AppExit::error());
     }
 }

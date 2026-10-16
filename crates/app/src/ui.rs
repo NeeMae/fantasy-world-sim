@@ -3,30 +3,27 @@
 use bevy::prelude::*;
 use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiContexts, egui};
+use content::Registry;
 use content::{BiomeId, ReliefId};
 use map_raster::MapMode;
 use sim_core::{Command, Date, Paint};
-use worldgen::EdgeStyle;
 
-use crate::map_view::MapView;
+use crate::planet_view::{Outline, PlanetView, describe_position};
 use crate::saves::{self, SaveState};
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
-use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, PointerOverUi, Selection, Tool, ToolState};
-use crate::world_setup::{
-    ASPECTS, Climate, LARGE_WORLD, LoadRequest, MAX_CANVAS, RegenerateRequest, SCALES, WorldSettings,
-};
+use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, Selection, Tool, ToolState};
+use crate::world_setup::{Content, DETAILS, LARGE_WORLD, LoadRequest, RegenerateRequest, WorldSettings};
 
 pub fn panels(
     mut contexts: EguiContexts,
     mut sim: ResMut<SimThread>,
-    view: Res<MapView>,
+    content: Res<Content>,
     mut selection: ResMut<Selection>,
     mut hover: ResMut<Hover>,
-    mut globe: ResMut<crate::globe::GlobeView>,
+    mut planet: ResMut<PlanetView>,
     mut tools: ResMut<ToolState>,
     mut settings: ResMut<WorldSettings>,
     mut regenerate: MessageWriter<RegenerateRequest>,
-    mut over_ui: ResMut<PointerOverUi>,
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     mut load: MessageWriter<LoadRequest>,
@@ -34,6 +31,7 @@ pub fn panels(
     mut name_draw: Local<u64>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
+    let registry = &content.0;
     let snap = sim.snapshot();
     let world = &snap.world;
     let mut root = egui::Ui::new(
@@ -42,7 +40,7 @@ pub fn panels(
         egui::UiBuilder::new().layer_id(egui::LayerId::background()).max_rect(ctx.viewport_rect()),
     );
 
-    let top = egui::Panel::top("time").show(&mut root, |ui| {
+    egui::Panel::top("time").show(&mut root, |ui| {
         ui.horizontal(|ui| {
             // Fixed-width slots, so the controls beside them don't shift as
             // the date grows or the rate changes.
@@ -68,8 +66,12 @@ pub fn panels(
                 ui.selectable_value(&mut map_mode.0, mode, label).on_hover_text("M cycles map views");
             }
             ui.separator();
-            ui.toggle_value(&mut globe.enabled, "Globe [G]")
-                .on_hover_text("Show the world on a globe: drag to turn it, scroll to zoom");
+            ui.selectable_value(&mut planet.globe, true, "Globe")
+                .on_hover_text("The planet seen from space (G switches)");
+            ui.selectable_value(&mut planet.globe, false, "Map")
+                .on_hover_text("The whole planet laid flat (G switches)");
+            ui.toggle_value(&mut planet.grid, "Grid")
+                .on_hover_text("Lines between hexes, when they're big enough");
             ui.separator();
             let rate = if current == Speed::Paused {
                 String::new()
@@ -79,47 +81,48 @@ pub fn panels(
             fixed_label(ui, "999999 ticks/s", rate, false);
             if let Some(hex) = hover.0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (col, row) = world.topology.offset(hex);
-                    let biome = view.registry.biome(world.terrain.biome[hex.index()]);
-                    ui.label(format!("{} ({col}, {row})", biome.name));
+                    let biome = registry.biome(world.terrain.biome[hex.index()]);
+                    ui.label(format!("{} · {}", biome.name, describe_position(&world.topology, hex)));
                 });
             }
         });
     });
 
-    let side = egui::Panel::right("side").default_size(250.0).show(&mut root, |ui| {
+    egui::Panel::right("side").default_size(250.0).show(&mut root, |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
             world_section(ui, &mut settings, &mut regenerate, world);
             ui.separator();
             saves::section(ui, &mut save_state, &sim, &settings, &mut load);
             ui.separator();
-            tools_section(ui, &mut tools, &view, &sim, snap.undo_redo);
+            tools_section(ui, &mut tools, registry, &sim, snap.undo_redo);
             ui.separator();
-            inspector_section(ui, &selection, &view, world);
+            inspector_section(ui, &selection, registry, world);
             ui.separator();
-            peoples_section(ui, &view, world, &mut name_draw);
+            peoples_section(ui, registry, world, &mut name_draw);
             ui.separator();
-            ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe · Ctrl+S: save");
+            ui.small("Left click: use tool · Right-drag or WASD: turn · Wheel or +/−: zoom");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe/map · Home: recentre · Ctrl+S: save");
         });
     });
 
-    let to_rect = |r: egui::Rect| Rect::new(r.min.x, r.min.y, r.max.x, r.max.y);
-    over_ui.panels = vec![to_rect(top.response.rect), to_rect(side.response.rect)];
-    if globe.enabled {
-        let central = egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(12, 14, 22)))
-            .show(&mut root, |ui| globe.show(ui, world, &view.registry, map_mode.0));
-        let input = central.inner;
-        hover.0 = input.hover;
-        if let Some(hex) = input.clicked
-            && tools.tool == Tool::Inspect
-        {
-            selection.0 = Some(hex);
-        }
-        over_ui.panels.push(to_rect(central.response.rect));
-    }
-    over_ui.busy = ctx.is_pointer_over_egui() || ctx.egui_is_using_pointer() || ctx.any_popup_open();
+    // The planet fills the rest, with outlines for what's hovered, what the
+    // brush would cover, and what's selected.
+    let hovered: Vec<_> = hover.0.map(|h| tools.affected_hexes(world, h)).unwrap_or_default();
+    let selected: Vec<_> = selection.0.into_iter().collect();
+    let outlines = [
+        Outline {
+            hexes: &hovered,
+            color: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 170),
+            width: 1.0,
+        },
+        Outline { hexes: &selected, color: egui::Color32::from_rgb(255, 214, 90), width: 2.0 },
+    ];
+    let pointer = egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(12, 14, 22)))
+        .show(&mut root, |ui| planet.show(ui, world, registry, map_mode.0, &outlines))
+        .inner;
+    hover.0 = pointer.hover;
+    tools.apply(&pointer, &sim, world, &mut selection);
     Ok(())
 }
 
@@ -130,13 +133,7 @@ fn world_section(
     world: &sim_core::World,
 ) {
     ui.heading("World");
-    ui.small(format!(
-        "Current: seed {} · {}×{} hexes{}",
-        world.seed,
-        world.topology.width(),
-        world.topology.height(),
-        if world.topology.wrap() == sim_core::Wrap::X { " · wraps" } else { "" }
-    ));
+    ui.small(format!("Current: seed {} · {} hexes", world.seed, world.topology.len()));
     egui::Grid::new("worldgen").num_columns(2).show(ui, |ui| {
         ui.label("Seed");
         ui.horizontal(|ui| {
@@ -147,9 +144,9 @@ fn world_section(
         });
         ui.end_row();
 
-        ui.label("World size").on_hover_text("How much of the planet the map shows");
+        ui.label("Planet size").on_hover_text("Bigger planets hold more, smaller continents");
         ui.add(
-            egui::Slider::new(&mut settings.world_size, 0.5..=6.0)
+            egui::Slider::new(&mut settings.world_size, 2.0..=10.0)
                 .step_by(0.25)
                 .custom_formatter(|v, _| world_size_name(v).to_string()),
         );
@@ -159,64 +156,16 @@ fn world_section(
         ui.add(egui::Slider::new(&mut settings.continent_size, 0.5..=3.0).step_by(0.1));
         ui.end_row();
 
-        ui.label("Scale")
-            .on_hover_text("How finely the world is divided into hexes; the geography stays the same");
-        ui.add_enabled_ui(settings.custom.is_none(), |ui| {
-            egui::ComboBox::from_id_salt("scale").selected_text(SCALES[settings.scale].0).show_ui(ui, |ui| {
-                for (i, (name, rows)) in SCALES.iter().enumerate() {
-                    ui.selectable_value(&mut settings.scale, i, format!("{name} ({rows} rows)"));
+        ui.label("Detail")
+            .on_hover_text("How finely the planet is divided into hexes; the geography stays the same");
+        egui::ComboBox::from_id_salt("detail")
+            .selected_text(DETAILS[settings.detail.min(DETAILS.len() - 1)].0)
+            .show_ui(ui, |ui| {
+                for (i, (name, f)) in DETAILS.iter().enumerate() {
+                    let hexes = 10 * (*f as u64) * (*f as u64) + 2;
+                    ui.selectable_value(&mut settings.detail, i, format!("{name} ({}k hexes)", hexes / 1000));
                 }
             });
-        });
-        ui.end_row();
-
-        ui.label("Canvas");
-        ui.add_enabled_ui(settings.custom.is_none(), |ui| {
-            egui::ComboBox::from_id_salt("aspect").selected_text(ASPECTS[settings.aspect].0).show_ui(
-                ui,
-                |ui| {
-                    for (i, (name, _)) in ASPECTS.iter().enumerate() {
-                        ui.selectable_value(&mut settings.aspect, i, *name);
-                    }
-                },
-            );
-        });
-        ui.end_row();
-
-        ui.label("");
-        let mut custom = settings.custom.is_some();
-        if ui.checkbox(&mut custom, "Custom size").changed() {
-            settings.custom = custom.then(|| settings.dimensions());
-        }
-        ui.end_row();
-        if let Some((w, h)) = settings.custom.as_mut() {
-            ui.label("");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(w).range(2..=MAX_CANVAS).speed(4));
-                ui.label("×");
-                ui.add(egui::DragValue::new(h).range(2..=MAX_CANVAS).speed(4));
-            });
-            ui.end_row();
-        }
-
-        ui.label("Edges");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut settings.edges, EdgeStyle::Open, "Open")
-                .on_hover_text("Land runs off the map, as if it were part of a larger world");
-            ui.selectable_value(&mut settings.edges, EdgeStyle::Ocean, "Ocean")
-                .on_hover_text("The world is ringed by sea (north and south only when wrapping)");
-        });
-        ui.end_row();
-
-        ui.label("Wrap");
-        if ui
-            .checkbox(&mut settings.wrap, "East–west")
-            .on_hover_text("A globe: travel off the east edge and arrive in the west")
-            .changed()
-        {
-            // A wrapped world is usually a whole planet.
-            settings.climate = if settings.wrap { Climate::Globe } else { Climate::Regional };
-        }
         ui.end_row();
 
         ui.label("Volatility")
@@ -339,20 +288,10 @@ fn world_section(
             },
         ));
         ui.end_row();
-
-        ui.label("Climate");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut settings.climate, Climate::Regional, "Regional")
-                .on_hover_text("Cool north to warm south");
-            ui.selectable_value(&mut settings.climate, Climate::Globe, "Globe")
-                .on_hover_text("Pole to pole, with the equator across the middle");
-        });
-        ui.end_row();
     });
 
-    let (w, h) = settings.dimensions();
-    let hexes = w as u64 * h as u64;
-    ui.small(format!("New world: {w}×{h} = {hexes} hexes"));
+    let hexes = settings.hexes();
+    ui.small(format!("New world: {hexes} hexes"));
     if hexes > LARGE_WORLD {
         ui.colored_label(
             egui::Color32::from_rgb(230, 180, 80),
@@ -370,10 +309,10 @@ fn world_section(
 
 fn world_size_name(v: f64) -> String {
     let name = match v {
-        v if v < 1.5 => "Region",
-        v if v < 2.5 => "Subcontinent",
-        v if v < 4.0 => "Continent",
-        _ => "Planet",
+        v if v < 3.0 => "Small",
+        v if v < 5.0 => "Earth-like",
+        v if v < 7.5 => "Large",
+        _ => "Vast",
     };
     format!("{v:.2} · {name}")
 }
@@ -381,7 +320,7 @@ fn world_size_name(v: f64) -> String {
 fn tools_section(
     ui: &mut egui::Ui,
     tools: &mut ToolState,
-    view: &MapView,
+    registry: &Registry,
     sim: &SimThread,
     undo_redo: (usize, usize),
 ) {
@@ -409,12 +348,12 @@ fn tools_section(
     ui.add(egui::Slider::new(&mut tools.brush_radius, 0..=MAX_BRUSH_RADIUS).text("Brush radius"));
     ui.label("Relief");
     ui.horizontal_wrapped(|ui| {
-        for (i, relief) in view.registry.reliefs().iter().enumerate() {
+        for (i, relief) in registry.reliefs().iter().enumerate() {
             ui.selectable_value(&mut tools.brush, Paint::Relief(ReliefId(i as u8)), &relief.name);
         }
     });
     ui.label("Biome");
-    for (i, biome) in view.registry.biomes().iter().enumerate() {
+    for (i, biome) in registry.biomes().iter().enumerate() {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
             let c = biome.color;
@@ -424,35 +363,30 @@ fn tools_section(
     }
 }
 
-fn inspector_section(ui: &mut egui::Ui, selection: &Selection, view: &MapView, world: &sim_core::World) {
+fn inspector_section(ui: &mut egui::Ui, selection: &Selection, registry: &Registry, world: &sim_core::World) {
     ui.heading("Inspector");
     let Some(hex) = selection.0 else {
         ui.label("Select a hex with the Inspect tool.");
         return;
     };
-    let (col, row) = world.topology.offset(hex);
     let i = hex.index();
     let t = &world.terrain;
-    let biome = view.registry.biome(t.biome[i]);
+    let biome = registry.biome(t.biome[i]);
     ui.label(egui::RichText::new(&biome.name).strong().size(18.0));
     egui::Grid::new("hex").num_columns(2).show(ui, |ui| {
         for (label, value) in [
-            ("Position", format!("{col}, {row}")),
+            ("Position", describe_position(&world.topology, hex)),
             ("Elevation", format!("{:.0}%", t.elevation[i] * 100.0)),
             ("Rainfall", format!("{:.0}%", t.moisture[i] * 100.0)),
             ("Temperature", format!("{:.0}%", t.temperature[i] * 100.0)),
             (
                 "Relief",
-                format!(
-                    "{} ({:.0}% rugged)",
-                    view.registry.relief(t.relief[i]).name,
-                    t.ruggedness[i] * 100.0
-                ),
+                format!("{} ({:.0}% rugged)", registry.relief(t.relief[i]).name, t.ruggedness[i] * 100.0),
             ),
             ("Range", range_description(t.massif[i])),
             ("River", river_description(t, i)),
-            ("Fertility", format!("{:.0}%", t.fertility(&view.registry, i) * 100.0)),
-            ("Travel cost", format!("×{:.1}", t.travel_cost(&view.registry, i))),
+            ("Fertility", format!("{:.0}%", t.fertility(registry, i) * 100.0)),
+            ("Travel cost", format!("×{:.1}", t.travel_cost(registry, i))),
             ("Plate", plate_description(world, i)),
         ] {
             ui.label(label);
@@ -479,11 +413,10 @@ fn fixed_label(ui: &mut egui::Ui, widest: &str, text: String, strong: bool) {
 
 /// The cultures in the loaded content, each with sample names in its own
 /// language. Peoples aren't placed in the world yet (that's Phase 2).
-fn peoples_section(ui: &mut egui::Ui, view: &MapView, world: &sim_core::World, draw: &mut u64) {
+fn peoples_section(ui: &mut egui::Ui, registry: &Registry, world: &sim_core::World, draw: &mut u64) {
     egui::CollapsingHeader::new(egui::RichText::new("Peoples").heading()).default_open(false).show(
         ui,
         |ui| {
-            let registry = &view.registry;
             if registry.cultures().is_empty() {
                 ui.label("No cultures in the loaded content.");
                 return;
@@ -556,13 +489,42 @@ pub fn hotkeys(
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     settings: Res<WorldSettings>,
-    mut globe: ResMut<crate::globe::GlobeView>,
+    mut planet: ResMut<PlanetView>,
+    time: Res<Time>,
 ) {
     if egui.wants_any_keyboard_input() {
         return;
     }
     if keys.just_pressed(KeyCode::KeyG) {
-        globe.enabled = !globe.enabled;
+        planet.globe = !planet.globe;
+    }
+    if keys.just_pressed(KeyCode::Home) {
+        planet.reset();
+    }
+    // Turning with the keys, unless Ctrl is down (Ctrl+S saves).
+    let ctrl_down = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if !ctrl_down {
+        let step = 500.0 * time.delta_secs();
+        let mut d = (0.0, 0.0);
+        for (pair, (dx, dy)) in [
+            ([KeyCode::KeyW, KeyCode::ArrowUp], (0.0, 1.0)),
+            ([KeyCode::KeyS, KeyCode::ArrowDown], (0.0, -1.0)),
+            ([KeyCode::KeyA, KeyCode::ArrowLeft], (1.0, 0.0)),
+            ([KeyCode::KeyD, KeyCode::ArrowRight], (-1.0, 0.0)),
+        ] {
+            if keys.any_pressed(pair) {
+                d = (d.0 + dx * step, d.1 + dy * step);
+            }
+        }
+        if d != (0.0, 0.0) {
+            planet.pan(d.0, d.1);
+        }
+        if keys.any_pressed([KeyCode::Equal, KeyCode::NumpadAdd]) {
+            planet.zoom_by((1.5 * time.delta_secs() as f64).exp());
+        }
+        if keys.any_pressed([KeyCode::Minus, KeyCode::NumpadSubtract]) {
+            planet.zoom_by((-1.5 * time.delta_secs() as f64).exp());
+        }
     }
     if keys.just_pressed(KeyCode::Space) {
         let next = if sim.speed() == Speed::Paused { SPEEDS[2].1 } else { Speed::Paused };

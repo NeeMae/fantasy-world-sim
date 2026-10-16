@@ -1,7 +1,7 @@
 //! Rivers and lakes, from the simulated rainfall.
 //!
 //! 1. **Drainage.** Every sink is filled (priority flood, after Barnes et
-//!    al.) so water can always flow downhill to the sea or off an open edge.
+//!    al.) so water can always flow downhill to the sea.
 //!    Each land hex drains to its lowest neighbour on the filled surface.
 //! 2. **Lakes.** Where filling had to raise the ground noticeably, the
 //!    basin holds a lake, provided enough water flows into it to keep it
@@ -20,7 +20,7 @@ use std::cmp::Reverse;
 use rayon::prelude::*;
 use std::collections::BinaryHeap;
 
-use sim_core::{Axial, HexId, NO_DRAIN, RIVER_DISCHARGE, Topology, Wrap};
+use sim_core::{HexId, NO_DRAIN, RIVER_DISCHARGE, Topology};
 /// How much filling (in elevation percentile) makes a basin a lake.
 const LAKE_DEPTH: f64 = 0.0015;
 /// Fewer hexes than this is a pond, too small to show: the river just
@@ -76,18 +76,15 @@ pub struct Drainage {
 }
 
 /// `elevation` with every sink filled to its spill level (priority flood
-/// from the sea and the open edges; each fill slopes very slightly towards
-/// its outlet).
+/// from the sea; each fill slopes very slightly towards its outlet). A world
+/// without sea drains to its lowest point.
 pub fn fill(topo: &Topology, elevation: &[f32], sea: &[bool]) -> Vec<f64> {
     let n = topo.len();
-    let (w, h) = (topo.width() as i32, topo.height() as i32);
-    let on_edge = |id: HexId| {
-        let (col, row) = topo.offset(id);
-        row == 0 || row == h - 1 || (topo.wrap() == Wrap::None && (col == 0 || col == w - 1))
-    };
+    let lowest = (0..n).min_by(|&a, &b| elevation[a].total_cmp(&elevation[b]).then(a.cmp(&b)));
+    let no_sea = !sea.iter().any(|&s| s);
+    let on_edge = |id: HexId| no_sea && Some(id.index()) == lowest;
 
-    // 1. Priority flood from every outlet: the sea, and land at open edges
-    // (the rest of the world lies beyond them).
+    // 1. Priority flood from every outlet: the sea.
     let mut filled = vec![f64::INFINITY; n];
     let mut done = vec![false; n];
     let mut queue = BinaryHeap::new();
@@ -138,7 +135,7 @@ pub fn drainage(
     // biggest drop in the *original* ground: on open slopes that's the
     // steepest way down, and across filled basins it follows the old valley
     // floor instead of a dead-straight line to the outlet. Edge hexes with
-    // no lower neighbour drain off the map.
+    // no lower neighbour end there.
     let route = |flow: Option<&[f32]>| -> Vec<u32> {
         (0..n)
             .into_par_iter()
@@ -406,9 +403,9 @@ fn accumulate(drain: &[u32], sea: &[bool], rain: &[f32], cell_area: f64) -> Vec<
 /// have an interior stay if they're a compact pond, at most
 /// [`MAX_POND`] hexes with no hex dangling off it.
 fn shape_lakes(topo: &Topology, lake: &mut [bool]) {
-    let ring = |lake: &[bool], i: usize| {
-        let a = topo.axial(HexId(i as u32));
-        Axial::DIRECTIONS.map(|d| topo.at_axial(a + d).is_some_and(|h| lake[h.index()]))
+    // Whether each neighbour, in order round the cell, is lake.
+    let ring = |lake: &[bool], i: usize| -> Vec<bool> {
+        topo.neighbors(HexId(i as u32)).map(|h| lake[h.index()]).collect()
     };
     let n = lake.len();
     let interior: Vec<bool> = (0..n).map(|i| lake[i] && ring(lake, i).iter().all(|&l| l)).collect();
@@ -441,7 +438,7 @@ fn shape_lakes(topo: &Topology, lake: &mut [bool]) {
                 // Its lake neighbours form one arc of at least two hexes.
                 let r = ring(lake, i);
                 let count = r.iter().filter(|&&l| l).count();
-                let arcs = (0..6).filter(|&k| r[k] && !r[(k + 1) % 6]).count();
+                let arcs = (0..r.len()).filter(|&k| r[k] && !r[(k + 1) % r.len()]).count();
                 count >= 2 && arcs == 1
             })
         {
@@ -457,22 +454,42 @@ fn shape_lakes(topo: &Topology, lake: &mut [bool]) {
 mod tests {
     use super::*;
 
-    /// A valley sloping down to the sea in the west, with a sink in it.
+    /// A local grid over a patch of the sphere near latitude 0, longitude 0:
+    /// column `c` and row `r` in cell spacings (continuous).
+    fn local(topo: &Topology, id: HexId) -> (f64, f64) {
+        let (lat, lon) = topo.lat_lon(id);
+        let s = topo.spacing();
+        (lon / s + 15.0, lat / s + 4.0)
+    }
+
+    fn cell(topo: &Topology, c: f64, r: f64) -> usize {
+        let s = topo.spacing();
+        topo.nearest(sim_core::from_lat_lon((r - 4.0) * s, (c - 15.0) * s), None).index()
+    }
+
+    /// A valley, walled in, sloping down to the sea in the west, with a sink
+    /// in it; the rest of the planet is sea.
     fn valley() -> (Topology, Vec<f32>, Vec<bool>) {
-        let topo = Topology::new(30, 9, Wrap::None);
-        let mut elevation = vec![0.0; topo.len()];
-        let mut sea = vec![false; topo.len()];
+        let topo = Topology::new(60);
+        let mut elevation = vec![0.1; topo.len()];
+        let mut sea = vec![true; topo.len()];
         for id in topo.ids() {
-            let (c, r) = topo.offset(id);
-            let across = (r as f32 - 4.0).abs() * 0.02; // valley floor in row 4
-            elevation[id.index()] = 0.5 + c as f32 * 0.01 + across;
-            if c < 3 {
-                sea[id.index()] = true;
-                elevation[id.index()] = 0.2;
+            let (c, r) = local(&topo, id);
+            if !(-0.5..30.5).contains(&c) || !(-1.5..9.5).contains(&r) {
+                continue;
             }
+            let i = id.index();
+            sea[i] = c < 3.0;
+            elevation[i] = if c < 3.0 {
+                0.2
+            } else if c > 29.5 || !(-0.5..8.5).contains(&r) {
+                2.0 // the walls
+            } else {
+                0.5 + c as f32 * 0.01 + (r as f32 - 4.0).abs() * 0.02 // valley floor in row 4
+            };
         }
         // A round basin halfway up the valley.
-        let centre = topo.at(15, 4).unwrap();
+        let centre = HexId(cell(&topo, 15.0, 4.0) as u32);
         for id in topo.ids() {
             if topo.distance(centre, id) <= 2 {
                 elevation[id.index()] = 0.55 + 0.002 * topo.distance(centre, id) as f32;
@@ -482,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn everything_drains_to_the_sea_or_off_the_map() {
+    fn everything_drains_to_the_sea() {
         let (topo, elevation, sea) = valley();
         let rain = vec![1.0; topo.len()];
         let h = compute(&topo, &elevation, &sea, &rain, 1.0, Routing::default(), 1.0);
@@ -503,7 +520,7 @@ mod tests {
         let (topo, elevation, sea) = valley();
         let rain = vec![1.0; topo.len()];
         let h = compute(&topo, &elevation, &sea, &rain, 1.0, Routing::default(), 1.0);
-        let at = |c, r| topo.at(c, r).unwrap().index();
+        let at = |c: i32, r: i32| cell(&topo, c as f64, r as f64);
         assert!(h.discharge[at(5, 4)] > h.discharge[at(11, 4)], "more water lower down the valley");
         assert!(h.discharge[at(20, 4)] > h.discharge[at(27, 4)]);
         assert!(h.lake[at(15, 4)], "the basin holds a lake");
@@ -513,7 +530,7 @@ mod tests {
     #[test]
     fn a_basin_that_does_not_fill_keeps_its_water_and_a_full_one_spills() {
         let (topo, elevation, sea) = valley();
-        let at = |c, r| topo.at(c, r).unwrap().index();
+        let at = |c: i32, r: i32| cell(&topo, c as f64, r as f64);
         // Too little water to fill the basin: the river ends in its lake.
         let h = compute(&topo, &elevation, &sea, &vec![1.0; topo.len()], 1.0, Routing::default(), 1.0);
         assert_eq!(h.drain[at(15, 4)], NO_DRAIN, "the lake has no outlet");
@@ -537,9 +554,12 @@ mod tests {
         let (topo, mut elevation, sea) = valley();
         // Raise the basin back out, and cut a trench one hex wide instead.
         for id in topo.ids() {
-            let (c, r) = topo.offset(id);
+            let (c, r) = local(&topo, id);
+            if !(3.0..29.5).contains(&c) || !(-0.5..8.5).contains(&r) {
+                continue;
+            }
             elevation[id.index()] = 0.5 + c as f32 * 0.01 + (r as f32 - 4.0).abs() * 0.02;
-            if r == 4 && (10..22).contains(&c) {
+            if (r - 4.0).abs() < 0.45 && (10.0..22.0).contains(&c) {
                 elevation[id.index()] = 0.5;
             }
         }
@@ -555,16 +575,16 @@ mod tests {
         let h = compute(&topo, &elevation, &sea, &rain, 0.05, Routing::default(), 1.0);
         let lake: Vec<usize> = (0..topo.len()).filter(|&i| h.lake[i]).collect();
         assert!(!lake.is_empty() && lake.len() < 19, "a small catchment fills only part of the basin");
-        let centre = topo.at(15, 4).unwrap();
+        let centre = HexId(cell(&topo, 15.0, 4.0) as u32);
         // The basin spills to the west; ground on the upstream side flows
         // into the lake rather than across to the outlet.
-        let upstream = |id: HexId| topo.offset(id).0 > 15 && topo.distance(centre, id) <= 2;
+        let upstream = |id: HexId| local(&topo, id).0 > 15.5 && topo.distance(centre, id) <= 2;
         for id in topo.ids().filter(|&id| upstream(id) && !h.lake[id.index()]) {
             let mut at = id.index();
             while !h.lake[at] && h.drain[at] != NO_DRAIN && topo.distance(centre, HexId(at as u32)) <= 2 {
                 at = h.drain[at] as usize;
             }
-            assert!(h.lake[at], "{:?} drains into the lake", topo.offset(id));
+            assert!(h.lake[at], "{:?} drains into the lake", local(&topo, id));
         }
     }
 }

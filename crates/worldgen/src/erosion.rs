@@ -104,13 +104,12 @@ pub fn erode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim_core::Wrap;
 
     #[test]
     fn rivers_cut_valleys_and_the_sea_floor_is_left_alone() {
         // A cone of land rising from the sea.
-        let topo = Topology::new(40, 40, Wrap::None);
-        let centre = topo.at(20, 20).unwrap();
+        let topo = Topology::new(40);
+        let centre = topo.nearest([1.0, 0.0, 0.0], None);
         let mut elevation: Vec<f32> =
             topo.ids().map(|id| 1.0 - topo.distance(centre, id) as f32 * 0.06).collect();
         let before = elevation.clone();

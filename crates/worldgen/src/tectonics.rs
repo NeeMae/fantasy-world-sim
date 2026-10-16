@@ -40,9 +40,13 @@ pub struct PlateLayer {
     seed: u64,
     /// Plate spacing in noise-space units (one unit is a region's height).
     cell: f64,
-    /// Whether sites spread in 3D (wrapping maps sample a cylinder) or lie
-    /// flat in the map plane.
+    /// Whether sites spread in 3D or lie flat in the map plane.
     three_d: bool,
+    /// For a planet: its radius. Plates' centres then lie on its surface
+    /// (only grid cells within half a cell of the surface hold one), so
+    /// boundaries are great circles, and plates turn about poles rather than
+    /// drifting in straight lines.
+    shell: Option<f64>,
     /// Sites precomputed over the area the map samples (see
     /// [`PlateLayer::prepare`]); anything outside is computed on demand.
     table: Option<SiteTable>,
@@ -67,7 +71,18 @@ const MEMBERSHIP_LIMIT: f64 = 2.4;
 
 impl PlateLayer {
     pub fn new(seed: u64, layer: u64, cell: f64, three_d: bool) -> Self {
-        PlateLayer { seed: rng::mix(seed, 1, layer, rng::purpose::WORLDGEN), cell, three_d, table: None }
+        PlateLayer {
+            seed: rng::mix(seed, 1, layer, rng::purpose::WORLDGEN),
+            cell,
+            three_d,
+            shell: None,
+            table: None,
+        }
+    }
+
+    /// Plates on the surface of a planet of `radius` (see `shell`).
+    pub fn on_planet(seed: u64, layer: u64, cell: f64, radius: f64) -> Self {
+        PlateLayer { shell: Some(radius), ..PlateLayer::new(seed, layer, cell, true) }
     }
 
     /// Precomputes the sites for noise-space points between `min` and `max`,
@@ -107,6 +122,28 @@ impl PlateLayer {
         let unit = |salt: u64| (key(salt) >> 11) as f64 / (1u64 << 53) as f64;
         let jitter = |axis: usize, salt: u64| (cell[axis] as f64 + 0.15 + 0.7 * unit(salt)) * self.cell;
         let pos = [jitter(0, 1), jitter(1, 2), if self.three_d { jitter(2, 3) } else { 0.0 }];
+        if let Some(radius) = self.shell {
+            let len = dot(pos, pos).sqrt();
+            if (len - radius).abs() > self.cell * 0.5 || len < 1e-9 {
+                // No plate here: far away, so it never wins.
+                return Site { cell, pos: [1e6; 3], velocity: [0.0; 3], rank: key(8) };
+            }
+            let up = pos.map(|v| v / len);
+            // Turning about a random pole (an Euler pole), at a random rate.
+            let z = unit(4) * 2.0 - 1.0;
+            let a = unit(6) * std::f64::consts::TAU;
+            let r = (1.0 - z * z).sqrt();
+            let axis = [r * a.cos(), r * a.sin(), z];
+            let speed = 0.35 + 0.65 * unit(5);
+            let turn = [
+                axis[1] * up[2] - axis[2] * up[1],
+                axis[2] * up[0] - axis[0] * up[2],
+                axis[0] * up[1] - axis[1] * up[0],
+            ];
+            let norm = dot(turn, turn).sqrt().max(0.2);
+            let velocity = turn.map(|v| v / norm * speed);
+            return Site { cell, pos: up.map(|v| v * radius), velocity, rank: key(8) };
+        }
         // Drift: a random direction (in the map plane for flat maps) and speed.
         let angle = unit(4) * std::f64::consts::TAU;
         let speed = 0.35 + 0.65 * unit(5);

@@ -6,6 +6,11 @@ and can optionally step in as a god or take the throne of a realm.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the design and roadmap.
 
+> **This branch (`globe-view`) generates the world on a sphere**: a
+> geodesic grid of hexes (and 12 pentagons) wrapped round the planet, shown
+> as a globe or a flat map. See [`docs/GLOBE.md`](docs/GLOBE.md) for what
+> changed and how it compares with the flat-map `master`.
+
 **Status:** Phase 1 (living land) prototyped: tectonics, simulated climate,
 rivers and lakes, fertility, and cultures with their own languages. Nothing
 lives in the world yet; that's Phase 2.
@@ -18,24 +23,26 @@ Requires a recent stable Rust toolchain. On Linux, Bevy also needs
 ```sh
 # Desktop app (run from the repository root so it finds packs/base)
 cargo run --release -p app -- --seed 42
-cargo run --release -p app -- --seed 3 --world-size 4 --wrap   # a whole planet
+cargo run --release -p app -- --seed 3 --detail fine --world-size 6   # a bigger, finer planet
 
 # Headless: generate, simulate 100 years, export the map as a PNG
 cargo run --release -p sim-cli -- --seed 42 --years 100 --png world.png
+cargo run --release -p sim-cli -- --seed 42 --png globe.png --projection globe --lat 30 --lon 90
 ```
 
 App controls:
 
 | Input | Action |
 |---|---|
-| Right- or middle-drag, WASD | Pan |
-| Mouse wheel | Zoom towards the cursor |
+| Right- or middle-drag, WASD / arrows | Turn the globe (or pan the map) |
+| Mouse wheel, + / − | Zoom |
+| G | Switch between the globe and a flat map of the whole planet |
+| Home | Recentre the view |
 | Left click | Use the current tool |
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
 | Ctrl+S | Save the world (see the Saves panel to name and load saves) |
-| G | Globe view: drag to turn the world, scroll to zoom, click to inspect |
 | M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Currents, Plates |
 | Space, 1–5 | Pause/resume, speed |
 
@@ -43,13 +50,9 @@ The World panel generates a new world from:
 
 | Setting | Effect |
 |---|---|
-| World size | How much of the planet the map shows, from a *Region* (one sea and its shores) to a *Planet* |
+| Planet size | Bigger planets hold more, smaller continents |
 | Continents | Fewer, bigger landmasses or more, smaller ones |
-| Scale | How finely the world is divided into hexes; the geography stays the same |
-| Canvas | Aspect ratio, or a custom width × height in hexes |
-| Edges | *Open*: land runs off the map. *Ocean*: the world is ringed by sea |
-| Wrap | East–west wrapping, for a globe you can pan around forever |
-| Climate | *Regional* (cool north, warm south) or *Globe* (pole to pole) |
+| Detail | How finely the planet is divided into hexes (64 000 to 1.3 million); the geography stays the same |
 | Sea level | How much of the map lies under the sea |
 | Temperature | From an ice age to a hothouse world |
 | Rainfall | From arid to drenched |
@@ -65,11 +68,12 @@ Worlds are saved to `fantasy-world-sim/saves` in your user data folder
 Support` on macOS); set `FWS_SAVES` to use another folder. A save holds the
 world, its history and the settings that made it.
 
-`sim-cli` takes the same options as flags (`--world-size`, `--continent-size`,
-`--shape cylinder`, `--edges ocean`, `--climate globe`, `--width`, `--height`,
+`sim-cli` takes the same options as flags (`--detail` (grid frequency: the
+planet has 10 × detail² + 2 hexes), `--world-size`, `--continent-size`,
 `--ocean`, `--temperature`, `--rainfall`, `--mountains`, `--erosion`,
 `--rivers`, `--lakes`, `--inland-seas`, `--volatility`), `--view
-terrain|elevation|rainfall|temperature|fertility|currents|plates` for `--png`,
+terrain|elevation|rainfall|temperature|fertility|currents|plates` and
+`--projection flat|globe` (with `--lat`, `--lon`, `--zoom`) for `--png`,
 `--save FILE` / `--load FILE`, and `--names N` to print sample names for every
 culture.
 
@@ -99,10 +103,10 @@ a river through a desert keeps a green floodplain.
 
 | Crate | Purpose |
 |---|---|
-| `crates/sim-core` | World state, hex topology, commands, tick loop, chronicle. No graphics. |
+| `crates/sim-core` | World state, the geodesic hex grid, commands, tick loop, chronicle. No graphics. |
 | `crates/content` | Def schemas and the RON content-pack loader |
 | `crates/worldgen` | Procedural terrain and biomes |
-| `crates/map-raster` | Draws the hex world as pixel art (used by the app and CLI) |
+| `crates/map-raster` | Draws the planet as pixel art, as a globe or a flat map (used by the app and CLI) |
 | `crates/names` | Name generator for culture languages |
 | `crates/sim-cli` | Headless runner |
 | `crates/app` | Bevy + egui desktop app |

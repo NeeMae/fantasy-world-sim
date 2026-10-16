@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::Resource;
-use sim_core::{Command, HexId, Simulation, World};
+use sim_core::{Command, Simulation, World};
 
 /// How fast the simulation runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,8 +47,6 @@ pub struct Snapshot {
 
 struct Shared {
     snapshot: Mutex<Snapshot>,
-    /// Hexes changed since the view last asked, so it can redraw just those.
-    changed: Mutex<Vec<HexId>>,
 }
 
 /// Handle to the simulation thread. Dropping it stops the thread.
@@ -68,7 +66,6 @@ impl SimThread {
                 ticks_per_second: 0.0,
                 undo_redo: (0, 0),
             }),
-            changed: Mutex::new(Vec::new()),
         });
         let (control, rx) = mpsc::channel();
         let thread_shared = shared.clone();
@@ -104,10 +101,6 @@ impl SimThread {
 
     pub fn snapshot(&self) -> Snapshot {
         self.shared.snapshot.lock().expect("simulation thread panicked").clone()
-    }
-
-    pub fn take_changed_hexes(&self) -> Vec<HexId> {
-        std::mem::take(&mut *self.shared.changed.lock().expect("simulation thread panicked"))
     }
 }
 
@@ -193,17 +186,13 @@ fn save(sim: &Simulation, path: PathBuf, settings: String, reply: Sender<Result<
 }
 
 fn publish(sim: &mut Simulation, shared: &Shared) {
-    let changed = sim.take_changed_hexes();
-    {
-        let mut snap = shared.snapshot.lock().expect("view thread panicked");
-        snap.tick = sim.world().tick;
-        snap.undo_redo = sim.undo_redo_depth();
-        if !changed.is_empty() {
-            snap.world = Arc::new(sim.world().clone());
-        }
-    }
-    // After the world is published, so the view never redraws stale terrain.
-    if !changed.is_empty() {
-        shared.changed.lock().expect("view thread panicked").extend(changed);
+    // The world is only republished when its terrain changed: the view
+    // redraws whenever it sees a new one.
+    let changed = !sim.take_changed_hexes().is_empty();
+    let mut snap = shared.snapshot.lock().expect("view thread panicked");
+    snap.tick = sim.world().tick;
+    snap.undo_redo = sim.undo_redo_depth();
+    if changed {
+        snap.world = Arc::new(sim.world().clone());
     }
 }

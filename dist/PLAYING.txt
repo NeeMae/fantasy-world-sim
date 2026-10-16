@@ -17,8 +17,10 @@ Keep the "packs" folder next to the program: it holds the game's content.
 
 Controls
 --------
-  Right- or middle-drag, WASD   pan
-  Mouse wheel                   zoom
+  Right- or middle-drag, WASD   turn the globe (or pan the map)
+  Mouse wheel, + / -            zoom
+  G                             globe / flat map
+  Home                          recentre
   Left click                    use tool (inspect, or paint)
   I / B                         inspect tool / paint tool
   [ / ]                         brush size
@@ -27,8 +29,8 @@ Controls
   M                             cycle map views
   Space, 1-5                    pause, speed
 
-The World panel on the right generates new worlds: try World size,
-Continents, Wrap, Sea level, Temperature, Rainfall, Mountains, Erosion and
+The World panel on the right generates new worlds: try Planet size,
+Continents, Detail, Sea level, Temperature, Rainfall, Mountains, Erosion and
 Inland seas, then "Regenerate world".
 
 The Saves panel names, lists and loads saved worlds. Saves are kept in
