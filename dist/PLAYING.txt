@@ -19,23 +19,31 @@ Controls
 --------
   Right- or middle-drag, WASD   pan
   Mouse wheel                   zoom
-  Left click                    use tool (inspect, or paint)
-  I / B                         inspect tool / paint tool
+  Left click                    use tool (inspect, paint or river)
+  I / B / R                     inspect / paint / river tool
   [ / ]                         brush size
   Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y undo / redo
-  Ctrl+S                        save the world
+  Esc                           menu (save, load, export image, new world, quit)
+  Ctrl+S                        quick-save
   M                             cycle map views
   Space, 1-5                    pause, speed
 
 The World panel on the right generates new worlds: try World size,
 Continents, Wrap, Sea level, Temperature, Rainfall, Mountains, Erosion and
-Inland seas, then "Regenerate world".
+Inland seas, then "Regenerate world". Geology: Simulated is an experimental,
+slower way of making mountains.
 
-The Saves panel names, lists and loads saved worlds. Saves are kept in
+The River tool draws rivers: drag the way the water should flow, and the
+river carries on downhill to the sea from where you stop. Its Erase mode
+dries rivers up.
+
+The Esc menu saves, loads and deletes saved worlds, exports the map as a
+PNG image, and asks before throwing away unsaved changes. Saves are kept in
 your user data folder, in fantasy-world-sim/saves:
   Windows:  %APPDATA%\fantasy-world-sim\saves
   macOS:    ~/Library/Application Support/fantasy-world-sim/saves
   Linux:    ~/.local/share/fantasy-world-sim/saves
+Exported images go in an "exports" folder beside "saves".
 
 See CHANGELOG.md for what's new.
 

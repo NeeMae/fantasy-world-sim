@@ -1,8 +1,32 @@
 # Changelog
 
-## Unreleased
+## v0.3.0
+
+The last release of the flat map: river drawing, an Esc menu, image
+export and an experimental simulated geology. (Development now moves to a
+world generated on a globe.)
 
 ### New
+- **River tool** (R): drag the way the water should flow to draw a stream,
+  river, big river or great river. Where you stop, it carries on downhill
+  along the land's drainage to the sea; crossing another river takes that
+  river's water along. Erase mode dries rivers up (the rivers below them
+  shrink or vanish). Undo and redo cover river edits, and they're saved.
+- **Esc menu**: Resume, Save, Save as…, Load…, Export image…, New random
+  world and Quit, with the world paused while it's open. Loading, quitting
+  or starting a new world asks first if there are unsaved changes; saves
+  can be deleted from the Load page. It replaces the sidebar's Saves panel.
+  Ctrl+S still quick-saves.
+- **Export image**: the whole map, in the view on screen, as a PNG at one
+  of four sizes, optionally with hex grid lines. Images go to an `exports`
+  folder beside the saves.
+- **Simulated geology** (experimental, World panel → Geology): instead of
+  sculpting mountains directly, the land is raised by the plates over many
+  steps while rivers cut valleys and slopes creep, so ranges come out as
+  carved ridges and valleys. Slower (several seconds); Classic stays the
+  default and is unchanged.
+- New worlds generate in the background, with a window showing each stage
+  and a live preview; the old world stays up until the new one is ready.
 - **Rivers** setting: from only the great rivers to every sizeable stream.
   The default now shows about half as many rivers as v0.2.0.
 - **Lakes** setting: from none to big lakes.
@@ -11,6 +35,8 @@
   basin to reach the sea.
 
 ### Fixed
+- Edits (painting, rivers) now show when the map is zoomed out, not only
+  once zoomed in.
 - Rivers no longer climb small rises left by erosion: carving valleys left
   dips along them, which are now filled back up.
 - Small streams beside a bigger river turn to join it more often instead of

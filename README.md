@@ -34,7 +34,9 @@ App controls:
 | I / B | Inspect tool / Paint (terrain brush) tool |
 | [ / ] | Shrink / grow the brush |
 | Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
-| Ctrl+S | Save the world (see the Saves panel to name and load saves) |
+| R | River tool: drag the way the water flows to draw a river (or erase rivers) |
+| Esc | Menu: resume, save, save as, load, export image, new world, quit (pauses the world) |
+| Ctrl+S | Quick-save under the current name |
 | M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Currents, Plates |
 | Space, 1–5 | Pause/resume, speed |
 
@@ -53,6 +55,7 @@ The World panel generates a new world from:
 | Temperature | From an ice age to a hothouse world |
 | Rainfall | From arid to drenched |
 | Mountains | How much mountain building the plates do |
+| Geology | Classic sculpts ranges directly; Simulated (experimental, slower) raises the land over time while rivers carve it |
 | Erosion | How much rivers have worn the land: young and sharp to ancient and carved |
 | Rivers | How many streams count as rivers: only the great rivers, or every sizeable stream |
 | Lakes | How big lakes grow before evaporation balances their inflow (none to big) |
