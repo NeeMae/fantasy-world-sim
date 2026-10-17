@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use content::Registry;
 use map_raster::{PixelRect, RenderOptions};
 use sim_core::{HexId, World};
@@ -136,6 +136,11 @@ fn make_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
     // `Image::new` takes only the full-size level; add the rest after.
     image.data = image.data.take().map(|base| with_mips(width, height, base));
     image.texture_descriptor.mip_level_count = mip_levels(width, height);
+    // When a chunk is redrawn, Bevy copies new data into a texture it can
+    // copy to, but only its full-size level, leaving the zoomed-out levels
+    // stale (edits wouldn't show until you zoomed in). Without the copy
+    // flag it makes a new texture from every level instead.
+    image.texture_descriptor.usage.remove(TextureUsages::COPY_DST);
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         mag_filter: ImageFilterMode::Nearest,
         min_filter: ImageFilterMode::Linear,

@@ -8,6 +8,8 @@ use crate::{HexId, command::Paint};
 pub enum EventKind {
     /// The land around a hex was remade by an outside power.
     TerrainReshaped { center: HexId, radius: u32, to: Paint, hexes_changed: u32 },
+    /// A river was drawn or dried up by an outside power.
+    RiverRedrawn { at: HexId, hexes_changed: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

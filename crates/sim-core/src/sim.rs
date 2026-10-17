@@ -4,14 +4,21 @@ use content::Registry;
 
 use content::{BiomeId, ReliefId};
 
-use crate::{Chronicle, Command, EditId, EventKind, HexId, Paint, World};
+use crate::{Chronicle, Command, EditId, EventKind, HexId, NO_DRAIN, Paint, World};
 
-/// The paintable surface of one hex.
+/// The editable surface of one hex: what's painted on it and the water
+/// through it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Surface {
     biome: BiomeId,
     relief: ReliefId,
+    drain: u32,
+    /// Discharge, as bits so the surface compares exactly.
+    discharge: u32,
 }
+
+/// The most a drawn river may carry, in multiples of the river threshold.
+pub const MAX_RIVER_FLOW: f32 = 1024.0;
 
 /// The largest brush a single command may use, to bound the work one
 /// (possibly untrusted) command can cause.
@@ -19,6 +26,45 @@ pub const MAX_RESHAPE_RADIUS: u32 = 64;
 
 /// How many edits can be undone.
 pub const UNDO_DEPTH: usize = 100;
+
+/// A river edit in progress: hexes' surfaces as they were before it, and
+/// as they are being changed to.
+struct RiverEdit {
+    before: Vec<(HexId, Surface)>,
+    after: std::collections::HashMap<HexId, Surface>,
+}
+
+impl RiverEdit {
+    fn new() -> Self {
+        RiverEdit { before: Vec::new(), after: std::collections::HashMap::new() }
+    }
+
+    /// Changes a hex's surface (as already changed by this edit).
+    fn set(&mut self, sim: &Simulation, hex: HexId, change: impl FnOnce(&mut Surface)) {
+        let surface = self.after.entry(hex).or_insert_with(|| {
+            let s = sim.surface(hex);
+            self.before.push((hex, s));
+            s
+        });
+        change(surface);
+    }
+
+    /// Applies the edit and records it for undo and in the chronicle.
+    fn finish(self, sim: &mut Simulation, at: HexId, edit: EditId, tick: u64) {
+        let changes: Vec<(HexId, Surface, Surface)> = self
+            .before
+            .into_iter()
+            .map(|(hex, before)| (hex, before, self.after[&hex]))
+            .filter(|(_, before, after)| before != after)
+            .collect();
+        if changes.is_empty() {
+            return;
+        }
+        sim.chronicle.record(tick, EventKind::RiverRedrawn { at, hexes_changed: changes.len() as u32 });
+        sim.set_surfaces(changes.iter().map(|&(hex, _, after)| (hex, after)));
+        sim.journal(edit, changes);
+    }
+}
 
 /// One undoable edit: every hex it changed, with its biome before and after,
 /// in the order the changes were made.
@@ -130,6 +176,74 @@ impl Simulation {
                     self.set_surfaces(changes.iter().map(|&(hex, _, after)| (hex, after)));
                     self.journal(edit, changes);
                 }
+                Command::DrawRiver { from, to, flow, edit } => {
+                    let w = &self.world;
+                    let valid = w.contains(from)
+                        && w.contains(to)
+                        && w.topology.neighbors(from).any(|n| n == to)
+                        && flow.is_finite()
+                        && (0.0..=MAX_RIVER_FLOW).contains(&flow)
+                        && !self.is_water(from)
+                        && !self.downstream(to).any(|h| h == from);
+                    if !valid {
+                        continue;
+                    }
+                    let mut edit_hexes = RiverEdit::new();
+                    let t = &self.world.terrain;
+                    let q = t.discharge[from.index()];
+                    let q_new = q.max(flow * t.river_threshold);
+                    // Take its water off the old way down, and send it the new way.
+                    let old: Vec<HexId> = self.downstream(from).skip(1).collect();
+                    let new: Vec<HexId> = std::iter::once(to).chain(self.downstream(to).skip(1)).collect();
+                    edit_hexes.set(self, from, |s| {
+                        s.drain = to.0;
+                        s.discharge = q_new.to_bits();
+                    });
+                    for h in old {
+                        edit_hexes.set(self, h, |s| {
+                            s.discharge = (f32::from_bits(s.discharge) - q).max(0.0).to_bits()
+                        });
+                    }
+                    for h in new {
+                        edit_hexes
+                            .set(self, h, |s| s.discharge = (f32::from_bits(s.discharge) + q_new).to_bits());
+                    }
+                    edit_hexes.finish(self, from, edit, tick);
+                }
+                Command::EraseRiver { center, radius, edit } => {
+                    if !self.world.contains(center) || radius > MAX_RESHAPE_RADIUS {
+                        continue;
+                    }
+                    let mut edit_hexes = RiverEdit::new();
+                    let threshold = self.world.terrain.river_threshold;
+                    let mut rivers: Vec<HexId> = self
+                        .world
+                        .topology
+                        .within(center, radius)
+                        .into_iter()
+                        .filter(|h| {
+                            !self.is_water(*h) && self.world.terrain.discharge[h.index()] >= threshold
+                        })
+                        .collect();
+                    // Upstream first (a river only grows downstream), so water
+                    // already taken away above isn't taken twice below.
+                    rivers.sort_by(|a, b| {
+                        let d = &self.world.terrain.discharge;
+                        d[a.index()].total_cmp(&d[b.index()]).then(a.0.cmp(&b.0))
+                    });
+                    for h in rivers {
+                        let q = self.world.terrain.discharge[h.index()];
+                        if q < threshold {
+                            continue;
+                        }
+                        for d in self.downstream(h).collect::<Vec<_>>() {
+                            edit_hexes.set(self, d, |s| {
+                                s.discharge = (f32::from_bits(s.discharge) - q).max(0.0).to_bits()
+                            });
+                        }
+                    }
+                    edit_hexes.finish(self, center, edit, tick);
+                }
                 Command::Undo => {
                     if let Some(edit) = self.undo.pop() {
                         self.set_surfaces(edit.changes.iter().rev().map(|&(hex, before, _)| (hex, before)));
@@ -153,16 +267,53 @@ impl Simulation {
 
     fn surface(&self, hex: HexId) -> Surface {
         let t = &self.world.terrain;
-        Surface { biome: t.biome[hex.index()], relief: t.relief[hex.index()] }
+        let i = hex.index();
+        Surface {
+            biome: t.biome[i],
+            relief: t.relief[i],
+            drain: t.drain[i],
+            discharge: t.discharge[i].to_bits(),
+        }
     }
 
     fn set_surfaces(&mut self, changes: impl Iterator<Item = (HexId, Surface)>) {
         for (hex, s) in changes {
-            self.world.terrain.biome[hex.index()] = s.biome;
-            self.world.terrain.relief[hex.index()] = s.relief;
+            let t = &mut self.world.terrain;
+            let i = hex.index();
+            let rerouted = t.drain[i] != s.drain || t.discharge[i].to_bits() != s.discharge;
+            // A river is drawn towards the hex it drains into (and that
+            // hex's drawing shows where rivers arrive), so both redraw.
+            for d in [t.drain[i], s.drain] {
+                if rerouted && d != NO_DRAIN {
+                    self.changed.push(HexId(d));
+                }
+            }
+            t.biome[i] = s.biome;
+            t.relief[i] = s.relief;
+            t.drain[i] = s.drain;
+            t.discharge[i] = f32::from_bits(s.discharge);
             self.changed.push(hex);
         }
         self.world.terrain_revision += 1;
+    }
+
+    fn is_water(&self, hex: HexId) -> bool {
+        self.registry.biome(self.world.terrain.biome[hex.index()]).water
+    }
+
+    /// `start` and the hexes its water flows through after it, to the sea
+    /// (or wherever it ends). Stops if the drainage ever loops.
+    fn downstream(&self, start: HexId) -> impl Iterator<Item = HexId> + '_ {
+        let drain = &self.world.terrain.drain;
+        let mut next = Some(start);
+        let mut steps = 0;
+        std::iter::from_fn(move || {
+            let here = next?;
+            steps += 1;
+            let d = drain[here.index()];
+            next = (d != NO_DRAIN && steps <= drain.len()).then_some(HexId(d));
+            Some(here)
+        })
     }
 
     /// Records changes under `edit`, merging into the latest edit if it has
@@ -206,6 +357,75 @@ impl Simulation {
 mod tests {
     use super::*;
     use crate::{Terrain, Topology, Wrap};
+
+    /// All land, so rivers can be drawn anywhere; returns three hexes in a row.
+    fn land_sim() -> (Simulation, [HexId; 4]) {
+        let mut s = sim(1);
+        s.world.terrain.biome.iter_mut().for_each(|b| *b = BiomeId(1));
+        let t = &s.world.topology;
+        let a = HexId(9);
+        let b = t.neighbors(a).next().unwrap();
+        let c = t.neighbors(b).find(|&n| n != a && !t.neighbors(a).any(|m| m == n)).unwrap();
+        let d = t.neighbors(a).find(|&n| n != b && n != c).unwrap();
+        (s, [a, b, c, d])
+    }
+
+    fn flow(s: &Simulation, h: HexId) -> f32 {
+        s.world.terrain.discharge[h.index()] / s.world.terrain.river_threshold
+    }
+
+    #[test]
+    fn drawn_rivers_carry_their_water_down_and_can_be_redirected() {
+        let (mut s, [a, b, c, d]) = land_sim();
+        s.submit(Command::DrawRiver { from: a, to: b, flow: 2.0, edit: EditId(1) });
+        s.submit(Command::DrawRiver { from: b, to: c, flow: 2.0, edit: EditId(1) });
+        s.apply_pending();
+        assert_eq!((flow(&s, a), flow(&s, b), flow(&s, c)), (2.0, 2.0, 2.0));
+        assert_eq!(s.world.terrain.drain[a.index()], b.0);
+        // Send the source another way: the old river below it dries up.
+        s.submit(Command::DrawRiver { from: a, to: d, flow: 2.0, edit: EditId(2) });
+        s.apply_pending();
+        assert_eq!((flow(&s, b), flow(&s, c), flow(&s, d)), (0.0, 0.0, 2.0));
+        // Undo puts the first river back; undo again removes it.
+        s.submit(Command::Undo);
+        s.apply_pending();
+        assert_eq!((flow(&s, b), flow(&s, c), flow(&s, d)), (2.0, 2.0, 0.0));
+        s.submit(Command::Undo);
+        s.apply_pending();
+        assert!([a, b, c, d].iter().all(|&h| flow(&s, h) == 0.0));
+        assert!([a, b, c, d].iter().all(|&h| s.world.terrain.drain[h.index()] == NO_DRAIN));
+    }
+
+    #[test]
+    fn rivers_cannot_loop_or_start_in_water() {
+        let (mut s, [a, b, c, _]) = land_sim();
+        s.submit(Command::DrawRiver { from: a, to: b, flow: 2.0, edit: EditId(1) });
+        s.submit(Command::DrawRiver { from: b, to: c, flow: 2.0, edit: EditId(1) });
+        s.apply_pending();
+        let revision = s.world.terrain_revision;
+        s.submit(Command::DrawRiver { from: b, to: a, flow: 2.0, edit: EditId(2) });
+        s.submit(Command::DrawRiver { from: a, to: c, flow: 2.0, edit: EditId(2) }); // not neighbours
+        s.submit(Command::DrawRiver { from: a, to: b, flow: f32::NAN, edit: EditId(2) });
+        s.apply_pending();
+        assert_eq!(s.world.terrain_revision, revision);
+        s.world.terrain.biome[c.index()] = BiomeId(0);
+        s.submit(Command::DrawRiver { from: c, to: b, flow: 2.0, edit: EditId(3) });
+        s.apply_pending();
+        assert_eq!(s.world.terrain_revision, revision);
+    }
+
+    #[test]
+    fn erasing_dries_a_river_from_there_down() {
+        let (mut s, [a, b, c, _]) = land_sim();
+        s.submit(Command::DrawRiver { from: a, to: b, flow: 3.0, edit: EditId(1) });
+        s.submit(Command::DrawRiver { from: b, to: c, flow: 3.0, edit: EditId(1) });
+        s.submit(Command::EraseRiver { center: b, radius: 0, edit: EditId(2) });
+        s.apply_pending();
+        assert_eq!((flow(&s, a), flow(&s, b), flow(&s, c)), (3.0, 0.0, 0.0));
+        s.submit(Command::Undo);
+        s.apply_pending();
+        assert_eq!((flow(&s, a), flow(&s, b), flow(&s, c)), (3.0, 3.0, 3.0));
+    }
 
     fn sim(seed: u64) -> Simulation {
         let registry = content::load_str(r##"(biomes: [(id: "sea", water: true), (id: "land")])"##).unwrap();

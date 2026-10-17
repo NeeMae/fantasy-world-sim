@@ -1,4 +1,4 @@
-//! Pointer tools: inspecting hexes and painting terrain.
+//! Pointer tools: inspecting hexes, painting terrain and drawing rivers.
 
 use bevy::prelude::*;
 use content::BiomeId;
@@ -13,7 +13,13 @@ pub enum Tool {
     Inspect,
     /// Click or drag to reshape terrain.
     Paint,
+    /// Drag to draw a river (or, erasing, to dry rivers up).
+    River,
 }
+
+/// River sizes the river tool draws, as multiples of the river threshold.
+pub const RIVER_SIZES: [(&str, f32); 4] =
+    [("Stream", 1.0), ("River", 4.0), ("Big river", 16.0), ("Great river", 64.0)];
 
 pub const MAX_BRUSH_RADIUS: u32 = 12;
 
@@ -23,13 +29,24 @@ pub struct ToolState {
     /// What the brush paints: a biome or a relief level.
     pub brush: Paint,
     pub brush_radius: u32,
+    /// Index into [`RIVER_SIZES`].
+    pub river_size: usize,
+    /// The river tool dries rivers up instead of drawing them.
+    pub river_erase: bool,
     /// Id for the next brush stroke, so each stroke is one undo step.
     next_edit: u64,
 }
 
 impl Default for ToolState {
     fn default() -> Self {
-        ToolState { tool: Tool::Inspect, brush: Paint::Biome(BiomeId(0)), brush_radius: 2, next_edit: 0 }
+        ToolState {
+            tool: Tool::Inspect,
+            brush: Paint::Biome(BiomeId(0)),
+            brush_radius: 2,
+            river_size: 1,
+            river_erase: false,
+            next_edit: 0,
+        }
     }
 }
 
@@ -39,6 +56,8 @@ impl ToolState {
         match self.tool {
             Tool::Inspect => vec![hex],
             Tool::Paint => world.topology.within(hex, self.brush_radius),
+            Tool::River if self.river_erase => world.topology.within(hex, self.brush_radius),
+            Tool::River => vec![hex],
         }
     }
 }
@@ -128,18 +147,34 @@ pub fn use_tool(
         *stroke = None;
         return;
     }
-    let paint = (stroke.as_mut(), tools.tool, hover.0);
-    let (Some((edit, last)), Tool::Paint, Some(hex)) = paint else { return };
-    if *last == Some(hex) {
+    let (Some((edit, last)), Some(hex)) = (stroke.as_mut(), hover.0) else { return };
+    if tools.tool == Tool::Inspect || *last == Some(hex) {
         return;
     }
     // Fill in hexes the pointer skipped over between frames.
-    let path = match *last {
-        Some(prev) => sim.snapshot().world.topology.line(prev, hex).into_iter().skip(1).collect(),
+    let line = match *last {
+        Some(prev) => sim.snapshot().world.topology.line(prev, hex),
         None => vec![hex],
     };
-    for center in path {
-        sim.submit(Command::Reshape { center, radius: tools.brush_radius, paint: tools.brush, edit: *edit });
+    let edit = *edit;
+    match tools.tool {
+        Tool::River if !tools.river_erase => {
+            // Each step of the stroke sends one hex's water into the next.
+            let flow = RIVER_SIZES[tools.river_size.min(RIVER_SIZES.len() - 1)].1;
+            for pair in line.windows(2) {
+                sim.submit(Command::DrawRiver { from: pair[0], to: pair[1], flow, edit });
+            }
+        }
+        Tool::River => {
+            for &center in line.iter().skip(last.is_some() as usize) {
+                sim.submit(Command::EraseRiver { center, radius: tools.brush_radius, edit });
+            }
+        }
+        _ => {
+            for &center in line.iter().skip(last.is_some() as usize) {
+                sim.submit(Command::Reshape { center, radius: tools.brush_radius, paint: tools.brush, edit });
+            }
+        }
     }
     *last = Some(hex);
     if released {
