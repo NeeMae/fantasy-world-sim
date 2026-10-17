@@ -9,10 +9,9 @@ use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 
 use bevy::prelude::*;
-use bevy_egui::egui;
 
 use crate::sim_thread::SimThread;
-use crate::world_setup::{LoadRequest, WorldSettings};
+use crate::world_setup::WorldSettings;
 
 pub const EXTENSION: &str = "world";
 
@@ -38,7 +37,7 @@ pub fn display_name(path: &Path) -> String {
 }
 
 /// Keeps file names portable: letters, digits, spaces, `-` and `_` only.
-fn file_name(name: &str) -> Option<String> {
+pub fn file_name(name: &str) -> Option<String> {
     let clean: String = name
         .trim()
         .chars()
@@ -62,6 +61,17 @@ pub struct SaveState {
     pub status: Option<(String, bool)>,
     pending: Option<Mutex<Receiver<Result<PathBuf, String>>>>,
     list: Option<Vec<SaveEntry>>,
+    /// The world state the last save (or load) captured, and the one a
+    /// save in progress is capturing: seed, tick and terrain revision.
+    saved: Option<(u64, u64, u64)>,
+    saving: Option<(u64, u64, u64)>,
+}
+
+/// What identifies a world's state for "unsaved changes".
+/// (The snapshot's world is only republished when terrain changes, so the
+/// tick comes separately.)
+fn mark(world: &sim_core::World, tick: u64) -> (u64, u64, u64) {
+    (world.seed, tick, world.terrain_revision)
 }
 
 impl SaveState {
@@ -76,6 +86,19 @@ impl SaveState {
         self.pending.is_some()
     }
 
+    /// Whether the world has changed (or time has passed) since it was last
+    /// saved or loaded. A fresh, untouched world doesn't count: its seed
+    /// and settings make it again.
+    pub fn unsaved(&self, world: &sim_core::World, tick: u64) -> bool {
+        let fresh = tick == 0 && world.terrain_revision == 0;
+        !fresh && self.saved != Some(mark(world, tick))
+    }
+
+    /// Records that `world` is what's on disk (just loaded).
+    pub fn mark_saved(&mut self, world: &sim_core::World) {
+        self.saved = Some(mark(world, world.tick));
+    }
+
     /// Starts saving the current world under [`SaveState::name`].
     pub fn save(&mut self, sim: &SimThread, settings: &WorldSettings) {
         if self.busy() {
@@ -86,12 +109,25 @@ impl SaveState {
             return;
         };
         let settings = ron::to_string(settings).unwrap_or_default();
+        // Saving pauses nothing: the state captured is the one between
+        // ticks when the sim thread gets the request, about now.
+        let snap = sim.snapshot();
+        self.saving = Some(mark(&snap.world, snap.tick));
         self.pending = Some(Mutex::new(sim.save(saves_dir().join(file), settings)));
         self.status = Some(("Saving…".into(), true));
     }
 
+    /// Deletes a save.
+    pub fn delete(&mut self, path: &Path) {
+        match std::fs::remove_file(path) {
+            Ok(()) => self.report(format!("Deleted {}", display_name(path)), true),
+            Err(e) => self.report(format!("Could not delete {}: {e}", display_name(path)), false),
+        }
+        self.refresh();
+    }
+
     /// Saved worlds, newest first. Cached until something is saved.
-    fn list(&mut self) -> &[SaveEntry] {
+    pub fn list(&mut self) -> &[SaveEntry] {
         self.list.get_or_insert_with(|| {
             let mut list: Vec<SaveEntry> = std::fs::read_dir(saves_dir())
                 .into_iter()
@@ -126,64 +162,15 @@ pub fn poll(mut state: ResMut<SaveState>) {
     state.pending = None;
     state.refresh();
     match result {
-        Ok(path) => state.report(format!("Saved {}", display_name(&path)), true),
+        Ok(path) => {
+            state.saved = state.saving.take();
+            state.report(format!("Saved {}", display_name(&path)), true)
+        }
         Err(e) => state.report(format!("Save failed: {e}"), false),
     }
 }
 
-pub fn section(
-    ui: &mut egui::Ui,
-    state: &mut SaveState,
-    sim: &SimThread,
-    settings: &WorldSettings,
-    load: &mut MessageWriter<LoadRequest>,
-) {
-    egui::CollapsingHeader::new(egui::RichText::new("Saves").heading()).default_open(false).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.name).hint_text("Name").desired_width(130.0));
-            let can_save = !state.busy() && !state.name.trim().is_empty();
-            if ui.add_enabled(can_save, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
-                state.save(sim, settings);
-            }
-        });
-        if let Some(file) = file_name(&state.name)
-            && state.list().iter().any(|e| e.path.file_name().is_some_and(|f| f == file.as_str()))
-        {
-            ui.small("Saving will replace the existing save with this name.");
-        }
-        if let Some((message, ok)) = &state.status {
-            let color = if *ok { ui.visuals().weak_text_color() } else { egui::Color32::LIGHT_RED };
-            ui.colored_label(color, message);
-        }
-        ui.separator();
-        let mut chosen = None;
-        let entries = state.list();
-        if entries.is_empty() {
-            ui.small("No saved worlds yet.");
-        }
-        for entry in entries {
-            ui.horizontal(|ui| {
-                if ui.button("Load").clicked() {
-                    chosen = Some((entry.path.clone(), entry.name.clone()));
-                }
-                ui.label(&entry.name);
-                if let Some(age) = entry.modified.and_then(|m| m.elapsed().ok()) {
-                    ui.small(format_age(age.as_secs()));
-                }
-            });
-        }
-        if let Some((path, name)) = chosen {
-            state.name = name;
-            load.write(LoadRequest(path));
-        }
-        if ui.small_button("Refresh").clicked() {
-            state.refresh();
-        }
-        ui.small(format!("Folder: {}", saves_dir().display()));
-    });
-}
-
-fn format_age(secs: u64) -> String {
+pub fn format_age(secs: u64) -> String {
     match secs {
         0..60 => "just now".into(),
         60..3600 => format!("{} min ago", secs / 60),

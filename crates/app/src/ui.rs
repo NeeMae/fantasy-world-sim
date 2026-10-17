@@ -8,10 +8,14 @@ use map_raster::MapMode;
 use sim_core::{Command, Date, Paint};
 use worldgen::EdgeStyle;
 
+use crate::export::ExportState;
 use crate::map_view::MapView;
-use crate::saves::{self, SaveState};
+use crate::menu::{Action, Menu};
+use crate::saves::SaveState;
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
-use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, PointerOverUi, Selection, Tool, ToolState};
+use crate::tools::{
+    Hover, MAX_BRUSH_RADIUS, MapModeSetting, PointerOverUi, RIVER_SIZES, Selection, Tool, ToolState,
+};
 use crate::world_setup::{
     ASPECTS, Climate, LARGE_WORLD, LoadRequest, MAX_CANVAS, RegenerateRequest, SCALES, WorldSettings,
 };
@@ -30,6 +34,7 @@ pub fn panels(
     mut save_state: ResMut<SaveState>,
     mut load: MessageWriter<LoadRequest>,
     mut generation: ResMut<crate::generating::Generation>,
+    (mut menu, mut export, mut exit): (ResMut<Menu>, ResMut<ExportState>, MessageWriter<AppExit>),
     // Bumped by "More names" so the samples change.
     mut name_draw: Local<u64>,
 ) -> Result {
@@ -44,6 +49,14 @@ pub fn panels(
 
     let top = egui::Panel::top("time").show(&mut root, |ui| {
         ui.horizontal(|ui| {
+            if ui
+                .button("☰ Menu")
+                .on_hover_text("Save, load, export an image, new world, quit (Esc)")
+                .clicked()
+            {
+                menu.escape(&mut sim);
+            }
+            ui.separator();
             // Fixed-width slots, so the controls beside them don't shift as
             // the date grows or the rate changes.
             fixed_label(ui, "Year 9999999, month 12", Date::from_tick(snap.tick).to_string(), true);
@@ -88,8 +101,6 @@ pub fn panels(
         egui::ScrollArea::vertical().show(ui, |ui| {
             world_section(ui, &mut settings, &mut regenerate, world, generation.busy());
             ui.separator();
-            saves::section(ui, &mut save_state, &sim, &settings, &mut load);
-            ui.separator();
             tools_section(ui, &mut tools, &view, &sim, snap.undo_redo);
             ui.separator();
             inspector_section(ui, &selection, &view, world);
@@ -97,11 +108,32 @@ pub fn panels(
             peoples_section(ui, &view, world, &mut name_draw);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: pan · Wheel: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · Ctrl+S: save");
+            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · R: river · Ctrl+S: save · Esc: menu");
         });
     });
 
     generation.window(ctx);
+
+    let context = crate::menu::Context {
+        sim: &mut sim,
+        saves: &mut save_state,
+        settings: &mut settings,
+        export: &mut export,
+        registry: &view.registry,
+        mode: map_mode.0,
+    };
+    match crate::menu::show(ctx, &mut menu, context) {
+        Some(Action::Load(path)) => {
+            load.write(LoadRequest(path));
+        }
+        Some(Action::NewWorld) => {
+            regenerate.write(RegenerateRequest);
+        }
+        Some(Action::Quit) => {
+            exit.write(AppExit::Success);
+        }
+        None => {}
+    }
 
     let to_rect = |r: egui::Rect| Rect::new(r.min.x, r.min.y, r.max.x, r.max.y);
     over_ui.panels = vec![to_rect(top.response.rect), to_rect(side.response.rect)];
@@ -386,6 +418,7 @@ fn tools_section(
     ui.horizontal(|ui| {
         ui.selectable_value(&mut tools.tool, Tool::Inspect, "Inspect [I]");
         ui.selectable_value(&mut tools.tool, Tool::Paint, "Paint [B]");
+        ui.selectable_value(&mut tools.tool, Tool::River, "River [R]");
     });
     ui.horizontal(|ui| {
         let (undo, redo) = undo_redo;
@@ -400,6 +433,27 @@ fn tools_section(
             sim.submit(Command::Redo);
         }
     });
+    if tools.tool == Tool::River {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut tools.river_erase, false, "Draw");
+            ui.selectable_value(&mut tools.river_erase, true, "Erase");
+        });
+        if tools.river_erase {
+            ui.add(egui::Slider::new(&mut tools.brush_radius, 0..=MAX_BRUSH_RADIUS).text("Brush radius"));
+            ui.small("Drag over rivers to dry them up; the rivers below shrink or vanish.");
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                for (i, (name, _)) in RIVER_SIZES.iter().enumerate() {
+                    ui.selectable_value(&mut tools.river_size, i, *name);
+                }
+            });
+            ui.small(
+                "Drag the way the water flows. Where you stop, the river carries on downhill along the \
+                 land's drainage; crossing another river takes its water with yours.",
+            );
+        }
+        return;
+    }
     if tools.tool != Tool::Paint {
         return;
     }
@@ -553,8 +607,13 @@ pub fn hotkeys(
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     settings: Res<WorldSettings>,
+    mut menu: ResMut<Menu>,
 ) {
-    if egui.wants_any_keyboard_input() {
+    // Esc works even while typing (it backs out of the menu's pages).
+    if keys.just_pressed(KeyCode::Escape) {
+        menu.escape(&mut sim);
+    }
+    if menu.open || egui.wants_any_keyboard_input() {
         return;
     }
     if keys.just_pressed(KeyCode::Space) {
@@ -583,6 +642,9 @@ pub fn hotkeys(
     }
     if keys.just_pressed(KeyCode::KeyB) {
         tools.tool = Tool::Paint;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        tools.tool = Tool::River;
     }
     if keys.just_pressed(KeyCode::BracketLeft) {
         tools.brush_radius = tools.brush_radius.saturating_sub(1);

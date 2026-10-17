@@ -273,6 +273,7 @@ pub fn load(
     saves.report(format!("Loaded {name}"), true);
     saves.name = name;
     let sim = Simulation::from_save(data, content.0.clone());
+    saves.mark_saved(sim.world());
     let size = show_world(&mut commands, &mut images, sim, mode.0);
     for entity in &old {
         commands.entity(entity).despawn();
