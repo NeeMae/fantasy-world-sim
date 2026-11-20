@@ -20,6 +20,14 @@ pub enum Command {
     Undo,
     /// Re-apply the most recently undone edit, if nothing new happened since.
     Redo,
+    /// Send `from`'s water into its neighbour `to`, as a river at least
+    /// `flow` times the river threshold, and on downhill from there along
+    /// the existing drainage. Ignored where it would make water go round in
+    /// a loop (`to` already drains into `from`).
+    DrawRiver { from: HexId, to: HexId, flow: f32, edit: EditId },
+    /// Dry up the rivers within `radius` of `center`: their water sinks
+    /// away there, so the rivers below them shrink or vanish.
+    EraseRiver { center: HexId, radius: u32, edit: EditId },
 }
 
 /// Groups reshapes into one undoable step. Chosen by whoever submits them;

@@ -8,11 +8,12 @@ use content::{BiomeId, ReliefId};
 use map_raster::MapMode;
 use sim_core::{Command, Date, Paint};
 
+use crate::export::ExportState;
 use crate::menu::{Action, Menu};
 use crate::planet_view::{Outline, PlanetView, describe_position};
 use crate::saves::SaveState;
 use crate::sim_thread::{SPEEDS, SimThread, Speed};
-use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, Selection, Tool, ToolState};
+use crate::tools::{Hover, MAX_BRUSH_RADIUS, MapModeSetting, RIVER_SIZES, Selection, Tool, ToolState};
 use crate::world_setup::{Content, DETAILS, LARGE_WORLD, LoadRequest, RegenerateRequest, WorldSettings};
 
 pub fn panels(
@@ -28,8 +29,7 @@ pub fn panels(
     mut map_mode: ResMut<MapModeSetting>,
     mut save_state: ResMut<SaveState>,
     mut load: MessageWriter<LoadRequest>,
-    mut exit: MessageWriter<AppExit>,
-    mut menu: ResMut<Menu>,
+    (mut menu, mut export, mut exit): (ResMut<Menu>, ResMut<ExportState>, MessageWriter<AppExit>),
     // Bumped by "More names" so the samples change.
     mut name_draw: Local<u64>,
 ) -> Result {
@@ -45,7 +45,11 @@ pub fn panels(
 
     egui::Panel::top("time").show(&mut root, |ui| {
         ui.horizontal(|ui| {
-            if ui.button("☰ Menu").on_hover_text("Save, load, new world, quit (Esc)").clicked() {
+            if ui
+                .button("☰ Menu")
+                .on_hover_text("Save, load, export an image, new world, quit (Esc)")
+                .clicked()
+            {
                 menu.escape(&mut sim);
             }
             ui.separator();
@@ -107,7 +111,7 @@ pub fn panels(
             peoples_section(ui, registry, world, &mut name_draw);
             ui.separator();
             ui.small("Left click: use tool · Right-drag or WASD: turn · Wheel or +/−: zoom");
-            ui.small("I: inspect · B: brush · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe/map · Home: recentre · Ctrl+S: save · Esc: menu");
+            ui.small("I: inspect · B: brush · R: river · [ ]: brush size · Ctrl+Z: undo · M: map view · G: globe/map · Home: recentre · Ctrl+S: save · Esc: menu");
         });
     });
 
@@ -128,7 +132,15 @@ pub fn panels(
         .show(&mut root, |ui| planet.show(ui, world, registry, map_mode.0, &outlines))
         .inner;
     let world = world.clone();
-    let context = crate::menu::Context { sim: &mut sim, saves: &mut save_state, settings: &mut settings };
+    let context = crate::menu::Context {
+        sim: &mut sim,
+        saves: &mut save_state,
+        settings: &mut settings,
+        export: &mut export,
+        registry,
+        mode: map_mode.0,
+        view: planet.globe_view(),
+    };
     match crate::menu::show(ctx, &mut menu, context) {
         Some(Action::Load(path)) => {
             load.write(LoadRequest(path));
@@ -425,6 +437,7 @@ fn tools_section(
     ui.horizontal(|ui| {
         ui.selectable_value(&mut tools.tool, Tool::Inspect, "Inspect [I]");
         ui.selectable_value(&mut tools.tool, Tool::Paint, "Paint [B]");
+        ui.selectable_value(&mut tools.tool, Tool::River, "River [R]");
     });
     ui.horizontal(|ui| {
         let (undo, redo) = undo_redo;
@@ -439,6 +452,27 @@ fn tools_section(
             sim.submit(Command::Redo);
         }
     });
+    if tools.tool == Tool::River {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut tools.river_erase, false, "Draw");
+            ui.selectable_value(&mut tools.river_erase, true, "Erase");
+        });
+        if tools.river_erase {
+            ui.add(egui::Slider::new(&mut tools.brush_radius, 0..=MAX_BRUSH_RADIUS).text("Brush radius"));
+            ui.small("Drag over rivers to dry them up; the rivers below shrink or vanish.");
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                for (i, (name, _)) in RIVER_SIZES.iter().enumerate() {
+                    ui.selectable_value(&mut tools.river_size, i, *name);
+                }
+            });
+            ui.small(
+                "Drag the way the water flows. Where you stop, the river carries on downhill along the \
+                 land's drainage; crossing another river takes its water with yours.",
+            );
+        }
+        return;
+    }
     if tools.tool != Tool::Paint {
         return;
     }
@@ -749,6 +783,9 @@ pub fn hotkeys(
     }
     if keys.just_pressed(KeyCode::KeyB) {
         tools.tool = Tool::Paint;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        tools.tool = Tool::River;
     }
     if keys.just_pressed(KeyCode::BracketLeft) {
         tools.brush_radius = tools.brush_radius.saturating_sub(1);

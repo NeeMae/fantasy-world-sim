@@ -21,11 +21,11 @@ Controls
   Mouse wheel, + / -            zoom
   G                             globe / flat map
   Home                          recentre
-  Left click                    use tool (inspect, or paint)
-  I / B                         inspect tool / paint tool
+  Left click                    use tool (inspect, paint, or draw rivers)
+  I / B / R                     inspect / paint / river tool
   [ / ]                         brush size
   Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y undo / redo
-  Esc                           menu (save, load, new world, quit)
+  Esc                           menu (save, load, export image, new world, quit)
   Ctrl+S                        quick-save
   M                             cycle map views
   Space, 1-5                    pause, speed
@@ -36,8 +36,14 @@ Inland seas and the plate settings, then "Regenerate world". In the Plates
 map view, select a hex to see its plate; you can set the plate's heading
 and speed by hand and Apply to regenerate the world with that motion.
 
+The River tool draws rivers: pick a size and drag the way the water
+should flow; where you stop, it carries on downhill to the sea. Erase
+dries rivers up.
+
 The Esc menu saves, loads and deletes saved worlds, and asks before
-throwing away unsaved changes. Saves are kept in
+throwing away unsaved changes. Export image saves a PNG of the whole
+planet as a flat map, or of the globe, into an "exports" folder beside
+the saves. Saves are kept in
 your user data folder, in fantasy-world-sim/saves:
   Windows:  %APPDATA%\fantasy-world-sim\saves
   macOS:    ~/Library/Application Support/fantasy-world-sim/saves

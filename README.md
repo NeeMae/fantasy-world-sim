@@ -39,10 +39,10 @@ App controls:
 | G | Switch between the globe and a flat map of the whole planet |
 | Home | Recentre the view |
 | Left click | Use the current tool |
-| I / B | Inspect tool / Paint (terrain brush) tool |
+| I / B / R | Inspect tool / Paint (terrain brush) tool / River tool |
 | [ / ] | Shrink / grow the brush |
-| Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke |
-| Esc | Menu: resume, save, save as, load, new world, quit (pauses the world) |
+| Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y | Undo / redo a brush stroke or river edit |
+| Esc | Menu: resume, save, save as, load, export image, new world, quit (pauses the world) |
 | Ctrl+S | Quick-save under the current name |
 | M | Cycle map views: Terrain, Elevation, Rainfall, Temperature, Fertility, Currents, Plates |
 | Space, 1–5 | Pause/resume, speed |

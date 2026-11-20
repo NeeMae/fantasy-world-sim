@@ -75,6 +75,11 @@ pub struct Outline<'a> {
 }
 
 impl PlanetView {
+    /// Where the globe looks (kept while the flat map is shown).
+    pub fn globe_view(&self) -> View {
+        self.globe_view
+    }
+
     pub fn projection(&self) -> Projection {
         if self.globe { Projection::Globe(self.globe_view) } else { Projection::Map(self.map_view) }
     }

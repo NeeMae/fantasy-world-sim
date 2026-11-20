@@ -6,6 +6,7 @@
 // Bevy systems declare everything they touch as parameters.
 #![allow(clippy::too_many_arguments)]
 
+mod export;
 mod menu;
 mod planet_view;
 mod saves;
@@ -89,8 +90,12 @@ fn main() -> AppExit {
         .init_resource::<saves::SaveState>()
         .init_resource::<menu::Menu>()
         .init_resource::<planet_view::PlanetView>()
+        .init_resource::<export::ExportState>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (world_setup::regenerate, world_setup::load, saves::poll, ui::hotkeys).chain())
+        .add_systems(
+            Update,
+            (world_setup::regenerate, world_setup::load, saves::poll, export::poll, ui::hotkeys).chain(),
+        )
         .add_systems(EguiPrimaryContextPass, ui::panels)
         .run()
 }

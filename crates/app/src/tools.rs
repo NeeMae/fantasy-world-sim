@@ -1,4 +1,4 @@
-//! Pointer tools: inspecting hexes and painting terrain.
+//! Pointer tools: inspecting hexes, painting terrain and drawing rivers.
 
 use bevy::prelude::*;
 use content::BiomeId;
@@ -13,7 +13,13 @@ pub enum Tool {
     Inspect,
     /// Click or drag to reshape terrain.
     Paint,
+    /// Drag to draw a river (or, erasing, to dry rivers up).
+    River,
 }
+
+/// River sizes the river tool draws, as multiples of the river threshold.
+pub const RIVER_SIZES: [(&str, f32); 4] =
+    [("Stream", 1.0), ("River", 4.0), ("Big river", 16.0), ("Great river", 64.0)];
 
 pub const MAX_BRUSH_RADIUS: u32 = 12;
 
@@ -23,6 +29,10 @@ pub struct ToolState {
     /// What the brush paints: a biome or a relief level.
     pub brush: Paint,
     pub brush_radius: u32,
+    /// Index into [`RIVER_SIZES`].
+    pub river_size: usize,
+    /// The river tool dries rivers up instead of drawing them.
+    pub river_erase: bool,
     /// Id for the next brush stroke, so each stroke is one undo step.
     next_edit: u64,
     /// The stroke being painted, and the last hex it reached.
@@ -35,6 +45,8 @@ impl Default for ToolState {
             tool: Tool::Inspect,
             brush: Paint::Biome(BiomeId(0)),
             brush_radius: 2,
+            river_size: 1,
+            river_erase: false,
             next_edit: 0,
             stroke: None,
         }
@@ -47,6 +59,8 @@ impl ToolState {
         match self.tool {
             Tool::Inspect => vec![hex],
             Tool::Paint => world.topology.within(hex, self.brush_radius),
+            Tool::River if self.river_erase => world.topology.within(hex, self.brush_radius),
+            Tool::River => vec![hex],
         }
     }
 
@@ -72,17 +86,36 @@ impl ToolState {
         if *last == Some(hex) {
             return;
         }
-        let path = match *last {
-            Some(prev) => world.topology.line(prev, hex).into_iter().skip(1).collect(),
+        // Fill in hexes the pointer skipped over between frames.
+        let line = match *last {
+            Some(prev) => world.topology.line(prev, hex),
             None => vec![hex],
         };
-        for center in path {
-            sim.submit(Command::Reshape {
-                center,
-                radius: self.brush_radius,
-                paint: self.brush,
-                edit: *edit,
-            });
+        let edit = *edit;
+        let fresh = line.iter().skip(last.is_some() as usize).copied();
+        match self.tool {
+            Tool::River if !self.river_erase => {
+                // Each step of the stroke sends one hex's water into the next.
+                let flow = RIVER_SIZES[self.river_size.min(RIVER_SIZES.len() - 1)].1;
+                for pair in line.windows(2) {
+                    sim.submit(Command::DrawRiver { from: pair[0], to: pair[1], flow, edit });
+                }
+            }
+            Tool::River => {
+                for center in fresh {
+                    sim.submit(Command::EraseRiver { center, radius: self.brush_radius, edit });
+                }
+            }
+            _ => {
+                for center in fresh {
+                    sim.submit(Command::Reshape {
+                        center,
+                        radius: self.brush_radius,
+                        paint: self.brush,
+                        edit,
+                    });
+                }
+            }
         }
         *last = Some(hex);
     }

@@ -1,11 +1,13 @@
-//! The Esc menu: resume, save, load, start a new world or quit. The world
-//! is paused while it's open.
+//! The Esc menu: resume, save, load, export an image, start a new world or
+//! quit. The world is paused while it's open.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 
+use crate::export::{self, ExportState, Shape};
 use crate::saves::{self, SaveState};
 use crate::sim_thread::{SimThread, Speed};
 use crate::world_setup::WorldSettings;
@@ -16,6 +18,7 @@ enum Page {
     Main,
     SaveAs,
     Load,
+    Export,
 }
 
 /// Something that needs a yes before it happens.
@@ -88,6 +91,12 @@ pub struct Context<'a> {
     pub sim: &'a mut SimThread,
     pub saves: &'a mut SaveState,
     pub settings: &'a mut WorldSettings,
+    pub export: &'a mut ExportState,
+    pub registry: &'a Arc<content::Registry>,
+    /// The map view on screen, which an export draws.
+    pub mode: map_raster::MapMode,
+    /// Where the globe on screen looks, which a globe export copies.
+    pub view: map_raster::View,
 }
 
 const WIDTH: f32 = 340.0;
@@ -105,6 +114,7 @@ pub fn show(ctx: &egui::Context, menu: &mut Menu, c: Context) -> Option<Action> 
         Page::Main => "Paused",
         Page::SaveAs => "Save world",
         Page::Load => "Load world",
+        Page::Export => "Export image",
     };
     egui::Modal::new("menu".into()).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
         ui.set_width(WIDTH);
@@ -118,6 +128,7 @@ pub fn show(ctx: &egui::Context, menu: &mut Menu, c: Context) -> Option<Action> 
             Page::Main => main_page(ui, menu, c, unsaved),
             Page::SaveAs => save_page(ui, menu, c),
             Page::Load => load_page(ui, menu, c, unsaved),
+            Page::Export => export_page(ui, menu, c),
         }
     });
     menu.action.take()
@@ -163,6 +174,12 @@ fn main_page(ui: &mut egui::Ui, menu: &mut Menu, c: Context, unsaved: bool) {
         if big_button(ui, true, "Load…").clicked() {
             c.saves.refresh();
             menu.page = Page::Load;
+        }
+        if big_button(ui, true, "Export image…").clicked() {
+            if c.export.name.trim().is_empty() {
+                c.export.name = format!("World {} {}", c.sim.snapshot().world.seed, mode_name(c.mode));
+            }
+            menu.page = Page::Export;
         }
         ui.add_space(6.0);
         if big_button(ui, true, "New random world")
@@ -297,6 +314,59 @@ fn load_page(ui: &mut egui::Ui, menu: &mut Menu, c: Context, unsaved: bool) {
     });
     status(ui, c.saves);
     ui.small(format!("Folder: {}", saves::saves_dir().display()));
+}
+
+fn export_page(ui: &mut egui::Ui, menu: &mut Menu, c: Context) {
+    let world = c.sim.snapshot().world;
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        ui.add(egui::TextEdit::singleline(&mut c.export.name).desired_width(WIDTH - 50.0));
+    });
+    ui.label(format!("The planet in the view shown now ({}).", mode_name(c.mode)));
+    ui.horizontal(|ui| {
+        ui.label("Shape");
+        ui.selectable_value(&mut c.export.shape, Shape::Map, "Flat map")
+            .on_hover_text("The whole planet, longitude across and latitude down");
+        ui.selectable_value(&mut c.export.shape, Shape::Globe, "Globe")
+            .on_hover_text("The globe from space, turned as it is on screen");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Size");
+        for (i, (name, _)) in export::SIZES.iter().enumerate() {
+            ui.selectable_value(&mut c.export.size, i, *name);
+        }
+    });
+    let (w, h) = c.export.dimensions(&world);
+    ui.small(format!("{w} × {h} pixels"));
+    ui.checkbox(&mut c.export.grid, "Hex grid lines");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let can = !c.export.busy() && saves::file_name(&c.export.name).is_some();
+        if ui.add_enabled(can, egui::Button::new("Export")).clicked() {
+            c.export.start(world.clone(), c.registry.clone(), c.mode, c.view);
+        }
+        if ui.button("Back").clicked() {
+            menu.page = Page::Main;
+        }
+    });
+    if let Some((message, ok)) = &c.export.status {
+        let color = if *ok { ui.visuals().weak_text_color() } else { egui::Color32::LIGHT_RED };
+        ui.colored_label(color, message);
+    }
+    ui.small(format!("Folder: {}", export::exports_dir().display()));
+}
+
+fn mode_name(mode: map_raster::MapMode) -> &'static str {
+    use map_raster::MapMode::*;
+    match mode {
+        Terrain => "terrain",
+        Elevation => "elevation",
+        Plates => "plates",
+        Rainfall => "rainfall",
+        Temperature => "temperature",
+        Fertility => "fertility",
+        Currents => "currents",
+    }
 }
 
 fn confirm_text(confirm: &Confirm) -> (String, &'static str) {

@@ -54,6 +54,13 @@ Right-drag or WASD turns the globe; G switches to the flat map; outlines for
 hover, brush and selection are drawn over it. The 2D camera and chunked map
 are gone.
 
+**Brought over from v0.3.0.** The river tool works unchanged on the sphere
+(it only follows neighbours and drainage). Export image draws either the
+whole planet as a flat map, twice as wide as tall, or the globe as it's
+turned on screen, at a chosen hex size (capped at 16384 pixels a side).
+Simulated geology and the background generation window were left on
+`master`: simulated geology is to be rebuilt for the sphere.
+
 ## Compared with `master`
 
 | | `master` (flat) | `globe-view` |

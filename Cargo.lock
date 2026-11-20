@@ -220,6 +220,7 @@ dependencies = [
  "bevy_egui",
  "clap",
  "content",
+ "image",
  "map-raster",
  "names",
  "rayon",
